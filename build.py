@@ -11,6 +11,33 @@ import sys
 APP_NAME = '视频号批量上传'
 
 
+def configure_console_output():
+    for stream_name in ('stdout', 'stderr'):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, 'reconfigure'):
+            continue
+        try:
+            stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+        except Exception:
+            pass
+
+
+def log(message):
+    text = str(message)
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        stream = sys.stdout
+        data = (text + '\n').encode(getattr(stream, 'encoding', None) or 'utf-8', errors='backslashreplace')
+        buffer = getattr(stream, 'buffer', None)
+        if buffer is not None:
+            buffer.write(data)
+            buffer.flush()
+        else:
+            stream.write(data.decode('utf-8', errors='replace'))
+            stream.flush()
+
+
 def detect_platform():
     if sys.platform == 'win32':
         return 'windows'
@@ -73,7 +100,7 @@ def clean(base):
             try:
                 shutil.rmtree(dp)
             except PermissionError:
-                print(f'[WARN] Cannot remove {dp}, file in use. Trying to continue...')
+                log(f'[WARN] Cannot remove {dp}, file in use. Trying to continue...')
     for f in glob.glob(os.path.join(base, '*.spec')):
         try:
             os.remove(f)
@@ -139,8 +166,8 @@ def build_pyinstaller_cmd(base, platform_name):
 def copy_playwright_browsers(base, platform_name, chromium_ver):
     ms_pw = get_ms_playwright_dir()
     if not ms_pw or not chromium_ver:
-        print('[WARN] Chromium not found, run: playwright install chromium')
-        print('[WARN] Packaged app will need Playwright Chromium installed separately')
+        log('[WARN] Chromium not found, run: playwright install chromium')
+        log('[WARN] Packaged app will need Playwright Chromium installed separately')
         return
 
     chromium_dir = os.path.join(ms_pw, f'chromium-{chromium_ver}')
@@ -149,12 +176,12 @@ def copy_playwright_browsers(base, platform_name, chromium_ver):
     else:
         dist_internal = os.path.join(base, 'dist', f'{APP_NAME}.app', 'Contents', 'MacOS', '_internal')
     if not (os.path.isdir(chromium_dir) and os.path.isdir(dist_internal)):
-        print('[WARN] Skip bundling Chromium because target runtime directory was not found')
+        log('[WARN] Skip bundling Chromium because target runtime directory was not found')
         return
 
     pw_dest = os.path.join(dist_internal, 'ms-playwright')
     os.makedirs(pw_dest, exist_ok=True)
-    print(f'[INFO] Copying Chromium to {pw_dest}')
+    log(f'[INFO] Copying Chromium to {pw_dest}')
 
     dest_chromium = os.path.join(pw_dest, f'chromium-{chromium_ver}')
     if not os.path.exists(dest_chromium):
@@ -176,7 +203,7 @@ def copy_playwright_browsers(base, platform_name, chromium_ver):
         if not os.path.exists(dest_ffmpeg):
             shutil.copytree(ffmpeg_dir, dest_ffmpeg)
 
-    print('[INFO] Chromium bundled successfully')
+    log('[INFO] Chromium bundled successfully')
 
 
 def get_dist_target(base, platform_name):
@@ -212,16 +239,17 @@ def get_target_size(target_path):
 
 
 def build():
+    configure_console_output()
     base = os.path.dirname(os.path.abspath(__file__))
     os.chdir(base)
     platform_name = detect_platform()
     version = read_version(base)
-    print(f'[INFO] Building version: {version}')
-    print(f'[INFO] Platform: {platform_name}')
+    log(f'[INFO] Building version: {version}')
+    log(f'[INFO] Platform: {platform_name}')
 
     chromium_ver = find_chromium_version()
     if chromium_ver:
-        print(f'[INFO] Chromium revision: {chromium_ver}')
+        log(f'[INFO] Chromium revision: {chromium_ver}')
 
     try:
         import PyInstaller  # noqa: F401
@@ -233,7 +261,7 @@ def build():
 
     clean(base)
     cmd = build_pyinstaller_cmd(base, platform_name)
-    print('[INFO] Running PyInstaller...')
+    log('[INFO] Running PyInstaller...')
     result = subprocess.run(cmd)
     if result.returncode != 0:
         raise SystemExit('[ERROR] PyInstaller failed')
@@ -252,10 +280,10 @@ def build():
 
     archive_path = make_release_archive(base, platform_name, version, target)
     total = get_target_size(target)
-    print(f'[SUCCESS] Build complete: {target}')
-    print(f'[INFO] Version: {version}')
-    print(f'[INFO] Archive: {archive_path}')
-    print(f'[INFO] Total size: {total / (1024 * 1024 * 1024):.2f} GB')
+    log(f'[SUCCESS] Build complete: {target}')
+    log(f'[INFO] Version: {version}')
+    log(f'[INFO] Archive: {archive_path}')
+    log(f'[INFO] Total size: {total / (1024 * 1024 * 1024):.2f} GB')
 
 
 if __name__ == '__main__':
