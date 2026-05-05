@@ -109,14 +109,15 @@ jobs:
           cp manifest.json release-assets/
 
       - name: Create Release in Public Repo
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.RELEASE_TOKEN }}
-          repository: qibiao17606170508/sph-app-releases
-          tag_name: ${{ github.ref_name }}
-          files: release-assets/*
-          generate_release_notes: true
-          make_latest: true
+         uses: softprops/action-gh-release@v2
+         with:
+           token: ${{ secrets.RELEASE_TOKEN }}
+           repository: qibiao17606170508/sph-app-releases
+           tag_name: ${{ github.ref_name }}
+           target_commitish: main
+           files: release-assets/*
+           generate_release_notes: true
+           make_latest: true
 
       - name: Update manifest in private repository
         run: |
