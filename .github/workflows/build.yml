@@ -109,15 +109,15 @@ jobs:
           cp manifest.json release-assets/
 
       - name: Create Release in Public Repo
-         env:
-           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-         run: |
-           TAG_NAME=${{ github.ref_name }}
-           gh release create "$TAG_NAME" release-assets/* \
-             --repo qibiao17606170508/sph-app-releases \
-             --title "$TAG_NAME" \
-             --notes "Release $TAG_NAME" \
-             --generate-notes || echo "Release already exists or failed"
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          TAG_NAME=${{ github.ref_name }}
+          gh release create "$TAG_NAME" release-assets/* \
+            --repo qibiao17606170508/sph-app-releases \
+            --title "$TAG_NAME" \
+            --notes "Release $TAG_NAME" \
+            --generate-notes || echo "Release already exists or failed"
 
       - name: Update manifest in private repository
         run: |
@@ -156,9 +156,3 @@ jobs:
 
       - name: Show release assets
         run: ls -lah release-assets
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
-          generate_release_notes: true
