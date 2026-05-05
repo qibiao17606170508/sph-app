@@ -170,6 +170,17 @@ def open_desktop():
             _apply_system_titlebar(window_params['title'])
         except Exception:
             pass
+        
+        # 修复退出卡死：在窗口关闭时强制结束进程
+        def on_closed():
+            print('[退出] 窗口已关闭，正在清理进程...')
+            os._exit(0)
+
+        window = webview.active_window()
+        if window:
+            window.events.closed += on_closed
+
+        # 启动 webview，禁用调试快捷键以防冲突
         webview.start(debug=False)
         return True
     except Exception as e:

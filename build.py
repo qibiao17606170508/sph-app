@@ -173,14 +173,12 @@ def copy_playwright_browsers(base, platform_name, chromium_ver):
 
     chromium_dir = os.path.join(ms_pw, f'chromium-{chromium_ver}')
     if platform_name == 'windows':
-        dist_internal = os.path.join(base, 'dist', APP_NAME, '_internal')
+        dist_internal = os.path.join(base, 'dist', DISPLAY_NAME, '_internal')
+        pw_dest = os.path.join(dist_internal, 'ms-playwright')
     else:
-        dist_internal = os.path.join(base, 'dist', f'{APP_NAME}.app', 'Contents', 'MacOS', '_internal')
-    if not (os.path.isdir(chromium_dir) and os.path.isdir(dist_internal)):
-        log('[WARN] Skip bundling Chromium because target runtime directory was not found')
-        return
-
-    pw_dest = os.path.join(dist_internal, 'ms-playwright')
+        # On macOS, place it in Resources for better visibility/standard compliance
+        pw_dest = os.path.join(base, 'dist', f'{DISPLAY_NAME}.app', 'Contents', 'Resources', 'ms-playwright')
+    
     os.makedirs(pw_dest, exist_ok=True)
     log(f'[INFO] Copying Chromium to {pw_dest}')
 
@@ -219,9 +217,21 @@ def make_release_archive(base, platform_name, version, target_path):
     archive_path = archive_base + '.zip'
     if os.path.exists(archive_path):
         os.remove(archive_path)
+    
     root_dir = os.path.dirname(target_path)
     base_name = os.path.basename(target_path)
-    shutil.make_archive(archive_base, 'zip', root_dir=root_dir, base_dir=base_name)
+    
+    if platform_name == 'macos':
+        # Use ditto or zip -r -y on macOS to preserve symlinks (critical for Chromium.app)
+        log(f'[INFO] Creating zip archive using native zip to preserve symlinks...')
+        try:
+            subprocess.run(['zip', '-r', '-y', archive_path, base_name], cwd=root_dir, check=True)
+        except Exception as e:
+            log(f'[ERROR] Native zip failed: {e}. Falling back to shutil (symlinks might break).')
+            shutil.make_archive(archive_base, 'zip', root_dir=root_dir, base_dir=base_name)
+    else:
+        shutil.make_archive(archive_base, 'zip', root_dir=root_dir, base_dir=base_name)
+        
     return archive_path
 
 
@@ -248,10 +258,49 @@ def calculate_sha256(file_path):
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 
+import subprocess
+from PIL import Image
+
+def convert_logo_to_icons(base):
+    """Convert logo.jpeg to app.ico and app.icns."""
+    logo_path = os.path.join(base, 'logo.jpeg')
+    if not os.path.exists(logo_path):
+        log(f'[WARN] logo.jpeg not found at {logo_path}, skipping icon conversion')
+        return
+
+    log(f'[INFO] Converting logo.jpeg to icons...')
+    try:
+        img = Image.open(logo_path)
+        
+        # Save as ICO
+        ico_path = os.path.join(base, 'app.ico')
+        icon_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+        img.save(ico_path, format='ICO', sizes=icon_sizes)
+        log(f'[SUCCESS] Created {ico_path}')
+
+        # Save as ICNS (macOS)
+        if sys.platform == 'darwin':
+            icns_path = os.path.join(base, 'app.icns')
+            img.save(icns_path, format='ICNS')
+            log(f'[SUCCESS] Created {icns_path}')
+        else:
+            # On Windows/Linux, we can't easily save as ICNS with PIL without extra libs, 
+            # but we can at least ensure the ICO exists.
+            pass
+    except Exception as e:
+        log(f'[ERROR] Icon conversion failed: {e}')
+
 def build():
     configure_console_output()
     base = os.path.dirname(os.path.abspath(__file__))
     os.chdir(base)
+    
+    # 转换图标
+    try:
+        convert_logo_to_icons(base)
+    except Exception as e:
+        log(f'[WARN] Icon conversion error: {e}')
+        
     platform_name = detect_platform()
     version = read_version(base)
     log(f'[INFO] Building version: {version}')

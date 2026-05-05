@@ -71,10 +71,16 @@ if getattr(sys, 'frozen', False):
     os.environ['APP_BASE_DIR'] = get_runtime_base_dir()
     # 只读资源: PyInstaller 临时解压目录 (_internal/)
     os.environ['APP_RES_DIR'] = sys._MEIPASS
-    # Playwright 浏览器: 捆绑在 _internal/ms-playwright/ 下
-    _pw_browsers = os.path.join(sys._MEIPASS, 'ms-playwright')
-    if os.path.isdir(_pw_browsers):
-        os.environ['PLAYWRIGHT_BROWSERS_PATH'] = _pw_browsers
+    # Playwright 浏览器: 优先检查 _internal/ms-playwright/
+    # macOS 下可能在 Contents/MacOS/_internal/ms-playwright 或 Contents/Resources/ms-playwright
+    candidates = [
+        os.path.join(sys._MEIPASS, 'ms-playwright'),
+        os.path.join(os.path.dirname(sys._MEIPASS), 'Resources', 'ms-playwright'),
+    ]
+    for _pw_browsers in candidates:
+        if os.path.isdir(_pw_browsers):
+            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = _pw_browsers
+            break
 else:
     os.environ.setdefault('APP_BASE_DIR', base_dir)
     os.environ.setdefault('APP_RES_DIR', base_dir)
