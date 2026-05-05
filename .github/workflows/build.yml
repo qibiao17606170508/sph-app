@@ -22,9 +22,11 @@ jobs:
         include:
           - os: macos-latest
             label: macOS
+            platform_name: macos
             artifact_name: macos-package
           - os: windows-latest
             label: Windows
+            platform_name: windows
             artifact_name: windows-package
 
     steps:
@@ -43,7 +45,19 @@ jobs:
         run: python -m playwright install chromium
 
       - name: Build package
+        id: build
         run: python build.py
+
+      - name: Save build info
+        run: |
+          echo "${{ matrix.platform_name }}_sha256=${{ steps.build.outputs.archive_sha256 }}" >> build_info.txt
+          echo "version=${{ steps.build.outputs.version }}" >> build_info.txt
+
+      - name: Upload build info artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info-${{ matrix.platform_name }}
+          path: build_info.txt
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
@@ -59,11 +73,85 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
+
+      - name: Generate Manifest
+        run: |
+          VERSION=$(grep "version=" release-assets/build_info.txt | head -n 1 | cut -d'=' -f2)
+          WIN_SHA=$(grep "windows_sha256=" release-assets/build_info.txt | cut -d'=' -f2)
+          MAC_SHA=$(grep "macos_sha256=" release-assets/build_info.txt | cut -d'=' -f2)
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          PUBLIC_REPO="qibiao17606170508/sph-app-releases"
+          
+          cat > manifest.json <<EOF
+          {
+            "latest_version": "${VERSION}",
+            "min_supported_version": "1.0.0",
+            "force": false,
+            "notes": "版本 ${TAG_NAME} 发布。更新包含性能优化和稳定性提升。",
+            "downloads": {
+              "windows": "https://github.com/${PUBLIC_REPO}/releases/download/${TAG_NAME}/sph-app-windows-${TAG_NAME}.zip",
+              "macos": "https://github.com/${PUBLIC_REPO}/releases/download/${TAG_NAME}/sph-app-macos-${TAG_NAME}.zip"
+            },
+            "sha256": {
+              "windows": "${WIN_SHA}",
+              "macos": "${MAC_SHA}"
+            }
+          }
+          EOF
+          cp manifest.json release-assets/
+
+      - name: Create Release in Public Repo
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+          repository: qibiao17606170508/sph-app-releases
+          tag_name: ${{ github.ref_name }}
+          files: release-assets/*
+          generate_release_notes: true
+          make_latest: true
+
+      - name: Update manifest in private repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "chore: update manifest.json for ${GITHUB_REF#refs/tags/}" || echo "No changes to commit"
+          git push origin main || echo "Push failed, skipping repository update"
+
+      - name: Deploy to GitHub Gist (Public Access)
+        if: env.GIST_ID != '' && env.GIST_TOKEN != ''
+        uses: exuanbo/actions-deploy-gist@v1
+        with:
+          token: ${{ secrets.GIST_TOKEN }}
+          gist_id: ${{ secrets.GIST_ID }}
+          file_path: manifest.json
+          file_type: text
+        env:
+          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+
+      - name: Update manifest in public repository
+        run: |
+          mkdir -p public-repo
+          cd public-repo
+          git init
+          git remote add origin https://${{ secrets.RELEASE_TOKEN }}@github.com/qibiao17606170508/sph-app-releases.git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main || echo "Main branch not found"
+          git checkout main || git checkout -b main
+          cp ../manifest.json .
+          git add manifest.json
+          git commit -m "chore: update manifest.json for ${GITHUB_REF#refs/tags/}" || echo "No changes"
+          git push origin main
 
       - name: Show release assets
         run: ls -lah release-assets
@@ -71,5 +159,5 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-assets/*.zip
+          files: release-assets/*
           generate_release_notes: true

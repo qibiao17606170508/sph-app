@@ -8,7 +8,8 @@ import subprocess
 import sys
 
 
-APP_NAME = '视频号批量上传'
+APP_NAME = 'sph-app'
+DISPLAY_NAME = '视频号批量上传'
 
 
 def configure_console_output():
@@ -144,7 +145,7 @@ def build_pyinstaller_cmd(base, platform_name):
         sys.executable, '-m', 'PyInstaller',
         '--onedir',
         '--windowed',
-        '--name', APP_NAME,
+        '--name', DISPLAY_NAME,
         '--add-data', f'public{os.pathsep}public',
         '--add-data', f'version.json{os.pathsep}.',
         '--add-data', f'accounts.json{os.pathsep}.',
@@ -208,8 +209,8 @@ def copy_playwright_browsers(base, platform_name, chromium_ver):
 
 def get_dist_target(base, platform_name):
     if platform_name == 'windows':
-        return os.path.join(base, 'dist', APP_NAME)
-    return os.path.join(base, 'dist', f'{APP_NAME}.app')
+        return os.path.join(base, 'dist', DISPLAY_NAME)
+    return os.path.join(base, 'dist', f'{DISPLAY_NAME}.app')
 
 
 def make_release_archive(base, platform_name, version, target_path):
@@ -237,6 +238,15 @@ def get_target_size(target_path):
                 pass
     return total
 
+
+import hashlib
+
+def calculate_sha256(file_path):
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
 
 def build():
     configure_console_output()
@@ -280,10 +290,20 @@ def build():
 
     archive_path = make_release_archive(base, platform_name, version, target)
     total = get_target_size(target)
+    sha256 = calculate_sha256(archive_path)
     log(f'[SUCCESS] Build complete: {target}')
     log(f'[INFO] Version: {version}')
     log(f'[INFO] Archive: {archive_path}')
+    log(f'[INFO] SHA256: {sha256}')
     log(f'[INFO] Total size: {total / (1024 * 1024 * 1024):.2f} GB')
+
+    # For GitHub Actions to capture
+    github_output = os.environ.get('GITHUB_OUTPUT')
+    if github_output:
+        with open(github_output, 'a') as f:
+            f.write(f'archive_sha256={sha256}\n')
+            f.write(f'version={version}\n')
+            f.write(f'platform={platform_name}\n')
 
 
 if __name__ == '__main__':

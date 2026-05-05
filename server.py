@@ -198,10 +198,14 @@ def get_platform_name():
 
 
 def fetch_remote_json(url, timeout=15):
-    req = urllib.request.Request(url, headers={'User-Agent': UPDATE_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode('utf-8', errors='ignore')
-    return json.loads(raw)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': UPDATE_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode('utf-8', errors='ignore')
+        return json.loads(raw)
+    except Exception as e:
+        print(f"Error fetching remote JSON from {url}: {e}")
+        return {}
 
 
 def resolve_update_info():
