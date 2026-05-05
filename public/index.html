@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN" style="color-scheme: light dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#e2e8f0" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#020617" media="(prefers-color-scheme: dark)" />
+    <title>视频号批量上传</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="update-shell" id="updateShell" style="display: none">
+      <div class="update-card">
+        <div class="update-badge">必须更新</div>
+        <h1>发现新版本</h1>
+        <p class="update-summary" id="updateSummary">当前版本已停止支持，请先完成更新后再继续使用。</p>
+        <div class="update-meta">
+          <span id="updateCurrentVersion">当前版本: -</span>
+          <span id="updateLatestVersion">最新版本: -</span>
+        </div>
+        <pre class="update-notes" id="updateNotes">正在获取更新说明…</pre>
+        <div class="update-actions">
+          <button id="updateNowBtn" class="btn btn-primary" type="button">立即更新</button>
+        </div>
+        <div class="update-error" id="updateError"></div>
+      </div>
+    </div>
+    <div class="auth-shell" id="authShell" style="display: none">
+      <div class="auth-card">
+        <div class="auth-brand">
+          <div class="auth-brand-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="23 7 16 12 23 17 23 7" />
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+            </svg>
+          </div>
+          <div>
+            <h1>欢迎回来</h1>
+            <p>登录后即可进入视频号批量上传后台</p>
+          </div>
+        </div>
+
+        <form class="auth-form" id="loginForm">
+          <div class="field">
+            <label for="loginUsername">账号</label>
+            <input id="loginUsername" class="input auth-input" type="text" placeholder="请输入账号" autocomplete="username" />
+          </div>
+          <div class="field">
+            <label for="loginPassword">密码</label>
+            <input id="loginPassword" class="input auth-input" type="password" placeholder="请输入密码" autocomplete="current-password" />
+          </div>
+          <div class="auth-error" id="loginError"></div>
+          <button id="loginSubmitBtn" class="btn btn-primary auth-submit" type="submit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+              <polyline points="10 17 15 12 10 7" />
+              <line x1="15" y1="12" x2="3" y2="12" />
+            </svg>
+            登录进入
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <div class="app" id="appShell" style="display: none">
+      <!-- ═══ Sidebar ═══ -->
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7" />
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+          </svg>
+          <span>视频号上传</span>
+          <button class="theme-toggle-btn" id="themeToggle" aria-label="切换深色模式" style="margin-left: auto">🌙</button>
+        </div>
+
+        <nav class="sidebar-nav">
+          <button class="nav-item active" data-view="dashboard">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="7" height="7" />
+              <rect x="14" y="3" width="7" height="7" />
+              <rect x="14" y="14" width="7" height="7" />
+              <rect x="3" y="14" width="7" height="7" />
+            </svg>
+            <span>仪表盘</span>
+          </button>
+          <button class="nav-item" data-view="upload">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+            <span>上传</span>
+          </button>
+          <button class="nav-item" data-view="results">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="8" y1="6" x2="21" y2="6" />
+              <line x1="8" y1="12" x2="21" y2="12" />
+              <line x1="8" y1="18" x2="21" y2="18" />
+              <line x1="3" y1="6" x2="3.01" y2="6" />
+              <line x1="3" y1="12" x2="3.01" y2="12" />
+              <line x1="3" y1="18" x2="3.01" y2="18" />
+            </svg>
+            <span>结果</span>
+          </button>
+          <button class="nav-item" data-view="logs">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+            <span>日志</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="sidebar-account-card" id="channelPanel">
+            <div class="sidebar-account-head">
+              <span class="sidebar-account-badge idle" id="channelStateBadge">未登录</span>
+            </div>
+            <div class="sidebar-account-actions">
+              <button class="btn btn-primary btn-sm" id="channelLoginBtn" type="button">扫码</button>
+              <button class="btn btn-ghost btn-sm" id="channelVerifyBtn" type="button">确认状态</button>
+              <button class="btn btn-ghost btn-sm sidebar-account-close" id="channelCloseBtn" type="button">关闭浏览器</button>
+            </div>
+          </div>
+          <div class="sidebar-user" id="sidebarUser" style="display: none">
+            <div class="sidebar-user-meta">
+              <span class="sidebar-user-label">当前登录</span>
+              <strong id="authUserName">-</strong>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="logoutBtn" type="button">退出登录</button>
+          </div>
+          <div class="sidebar-version" id="sidebarVersion"></div>
+        </div>
+      </aside>
+
+      <!-- ═══ Main Content ═══ -->
+      <main class="main">
+        <!-- ─── DASHBOARD ─── -->
+        <section class="view active" id="view-dashboard">
+          <div class="view-header">
+            <h2>仪表盘</h2>
+            <p>上传概览和最近动态</p>
+          </div>
+
+          <div class="stats-grid" id="statsGrid">
+            <div class="stat-card">
+              <div class="stat-value" id="statTotal">&mdash;</div>
+              <div class="stat-label">总发布数</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value accent" id="statRate">&mdash;</div>
+              <div class="stat-label">成功率</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value" id="statFailed">&mdash;</div>
+              <div class="stat-label">失败数</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value" id="statAccounts">&mdash;</div>
+              <div class="stat-label">登录账号</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>最近发布</h3>
+              <button class="btn btn-ghost btn-sm" id="dashRefreshBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="23 4 23 10 17 10" />
+                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                </svg>
+                刷新
+              </button>
+            </div>
+            <div class="table-wrap" id="dashTable"></div>
+          </div>
+        </section>
+
+        <!-- ─── UPLOAD ─── -->
+        <section class="view" id="view-upload">
+          <div class="view-header">
+            <h2>批量上传</h2>
+            <p>添加视频，一键发布到视频号</p>
+          </div>
+
+          <!-- Media card: video + cover -->
+          <div class="card">
+            <div class="card-header">
+              <h3>媒体素材</h3>
+            </div>
+            <div class="drop-zone" id="videoDrop">
+              <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polygon points="23 7 16 12 23 17 23 7" />
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+              </svg>
+              <div class="drop-text">拖入视频文件到此处</div>
+              <div class="drop-hint">MP4 &middot; 可批量选择 &middot; 最大 20GB</div>
+              <input type="file" accept="video/mp4,video/*" class="drop-input" id="videoInput" multiple aria-label="选择视频文件" />
+              <div class="drop-preview" id="videoPreview">
+                <video controls></video>
+                <span class="drop-filename"></span>
+              </div>
+            </div>
+
+            <!-- Batch video strip -->
+            <div class="batch-video-strip" id="batchVideoStrip" style="display: none"></div>
+
+            <div class="drop-zone drop-zone-sm" id="coverDrop" style="margin-bottom: 0">
+              <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <polyline points="21 15 16 10 5 21" />
+              </svg>
+              <div class="drop-text">拖入封面图片 (选填)</div>
+              <div class="drop-hint">PNG / JPG</div>
+              <input type="file" accept="image/png,image/jpeg,image/*" class="drop-input" id="coverInput" aria-label="选择封面图片" />
+              <div class="drop-preview" id="coverPreview">
+                <img alt="cover preview" />
+                <span class="drop-filename"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Metadata form -->
+          <div class="card form-card">
+            <div class="field-row">
+              <div class="field">
+                <label>视频描述</label>
+                <textarea id="formDesc" class="input textarea" rows="2" placeholder="视频文案描述，支持 #话题标签"></textarea>
+              </div>
+            </div>
+            <div class="field-row field-row-4">
+              <div class="field">
+                <label>短标题 <span class="field-optional">选填</span></label>
+                <input type="text" id="formTitle" class="input" placeholder="搜索、发现页展示" maxlength="50" />
+                <span class="field-hint" id="titleHint">出现在搜索、话题、发现页等场景</span>
+              </div>
+              <div class="field">
+                <label>定时发表 <span class="field-optional">选填</span></label>
+                <input type="datetime-local" id="formTime" class="input" />
+                <span class="field-hint" style="color: var(--yellow); line-height: 1.6"> 如果间隔时间+定时时间大于视频上传时间，视频会立即上传。请确保设定时间在未来。</span>
+              </div>
+              <div class="field">
+                <label>视频号剧集 <span class="field-optional">选填</span></label>
+                <input type="text" id="formDrama" class="input" placeholder="如：恶媳护婆婆" />
+              </div>
+              <div class="field">
+                <label>间隔(分钟) <span class="field-optional">选填</span></label>
+                <input type="number" id="formInterval" class="input" min="0" max="1440" value="1" placeholder="0" />
+                <span class="field-hint">批量错开时间用；每条<strong>发表成功</strong>后按本值等待再传下一条。服务端规则：仅当定时时刻距现在<strong>大于 本值+5 分钟</strong>才在微信里勾选定时，否则立即发表。填 0 或未填按 1 分钟计。</span>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button id="addEntryBtn" class="btn btn-primary">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                添加到队列
+              </button>
+            </div>
+          </div>
+
+          <!-- Queue -->
+          <div class="card">
+            <div class="card-header">
+              <h3>上传队列 <span class="badge" id="entryCount">0</span> <button id="clearEntriesBtn" class="btn btn-ghost btn-sm" style="display: none; margin-left: 8px">全部清除</button></h3>
+              <div class="card-actions">
+                <button id="startBtn" class="btn btn-primary">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                  开始上传
+                </button>
+                <button id="stopBtn" class="btn btn-danger" disabled>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+                  停止
+                </button>
+                <button id="queueClearRefreshBtn" type="button" class="btn btn-ghost btn-sm" title="刷新发布记录；未在上传时可清除队列中的失败项">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+                    <path d="M21 3v5h-5" />
+                    <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+                    <path d="M8 16H3v5" />
+                  </svg>
+                  清除/刷新
+                </button>
+                <button id="retryBtn" class="btn btn-ghost" style="display: none">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M1 4v6h6" />
+                    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                  </svg>
+                  重试失败项
+                </button>
+              </div>
+            </div>
+
+            <!-- Progress bar -->
+            <div class="progress-wrap" id="progressWrap" style="display: none">
+              <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+              <div class="progress-text" id="progressText">0 / 0</div>
+            </div>
+
+            <!-- Timeline -->
+            <div class="timeline" id="timeline"></div>
+
+            <!-- Entry list -->
+            <div class="entry-list" id="entryList">
+              <div class="empty-state">暂无视频待上传</div>
+            </div>
+          </div>
+
+          <!-- Live log -->
+          <div class="card log-card">
+            <div class="card-header collapsible" id="logToggle">
+              <h3>实时日志</h3>
+              <div class="card-actions">
+                <button id="clearLogBtn" class="btn btn-ghost btn-sm">清空</button>
+                <svg class="collapse-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+              </div>
+            </div>
+            <div class="log-viewer" id="liveLog"></div>
+          </div>
+        </section>
+
+        <!-- ─── RESULTS ─── -->
+        <section class="view" id="view-results">
+          <div class="view-header">
+            <h2>发布结果</h2>
+            <p>查看每次上传的详细发布状态</p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="filter-tabs" id="resultFilters">
+                <button class="filter-tab active" data-filter="all">全部</button>
+                <button class="filter-tab" data-filter="published">已发布</button>
+                <button class="filter-tab" data-filter="failed">失败</button>
+                <button class="filter-tab" data-filter="uncertain">待确认</button>
+                <button class="filter-tab" data-filter="skipped">已跳过</button>
+              </div>
+              <div class="card-actions" style="gap: 8px">
+                <input type="text" id="resultSearch" class="input" placeholder="搜索标题或文件名…" style="width: 200px; height: 32px; font-size: 13px" aria-label="搜索发布结果" />
+                <button id="exportResultsBtn" class="btn btn-ghost btn-sm">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  导出 CSV
+                </button>
+                <button id="refreshResultsBtn" class="btn btn-ghost btn-sm">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="23 4 23 10 17 10" />
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                  </svg>
+                  刷新
+                </button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table id="resultsTable">
+                <thead>
+                  <tr>
+                    <th>视频</th>
+                    <th>标题</th>
+                    <th>状态</th>
+                    <th>错误信息</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ─── LOGS ─── -->
+        <section class="view" id="view-logs">
+          <div class="view-header">
+            <h2>运行日志</h2>
+            <p>完整的系统运行日志</p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="log-toolbar">
+                <input type="text" id="logSearch" class="input log-search" placeholder="搜索日志…" />
+                <label class="toggle-label">
+                  <input type="checkbox" id="logAutoRefresh" checked />
+                  <span>自动刷新</span>
+                </label>
+              </div>
+              <div class="card-actions">
+                <button id="refreshLogBtn" class="btn btn-ghost btn-sm">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="23 4 23 10 17 10" />
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                  </svg>
+                  刷新
+                </button>
+              </div>
+            </div>
+            <div class="log-viewer log-viewer-full" id="fullLog"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Toast container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Modal -->
+    <div id="modalOverlay" class="modal-overlay" style="display: none">
+      <div class="modal">
+        <div class="modal-title" id="modalTitle"></div>
+        <div class="modal-body" id="modalBody"></div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="modalCancel">取消</button>
+          <button class="btn btn-primary" id="modalOk">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/socket.io.min.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
