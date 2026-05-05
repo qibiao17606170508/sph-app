@@ -50,14 +50,14 @@ jobs:
 
       - name: Save build info
         run: |
-          echo "${{ matrix.platform_name }}_sha256=${{ steps.build.outputs.archive_sha256 }}" >> build_info.txt
-          echo "version=${{ steps.build.outputs.version }}" >> build_info.txt
+          echo "${{ matrix.platform_name }}_sha256=${{ steps.build.outputs.archive_sha256 }}" >> build_info_${{ matrix.platform_name }}.txt
+          echo "version=${{ steps.build.outputs.version }}" >> build_info_${{ matrix.platform_name }}.txt
 
       - name: Upload build info artifact
         uses: actions/upload-artifact@v4
         with:
           name: build-info-${{ matrix.platform_name }}
-          path: build_info.txt
+          path: build_info_${{ matrix.platform_name }}.txt
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
@@ -84,9 +84,12 @@ jobs:
 
       - name: Generate Manifest
         run: |
-          VERSION=$(grep "version=" release-assets/build_info.txt | head -n 1 | cut -d'=' -f2)
-          WIN_SHA=$(grep "windows_sha256=" release-assets/build_info.txt | cut -d'=' -f2)
-          MAC_SHA=$(grep "macos_sha256=" release-assets/build_info.txt | cut -d'=' -f2)
+          # 合并所有 build_info 文件
+          cat release-assets/build_info_*.txt > combined_info.txt
+          
+          VERSION=$(grep "version=" combined_info.txt | head -n 1 | cut -d'=' -f2)
+          WIN_SHA=$(grep "windows_sha256=" combined_info.txt | cut -d'=' -f2)
+          MAC_SHA=$(grep "macos_sha256=" combined_info.txt | cut -d'=' -f2)
           TAG_NAME=${GITHUB_REF#refs/tags/}
           PUBLIC_REPO="qibiao17606170508/sph-app-releases"
           
@@ -108,16 +111,27 @@ jobs:
           EOF
           cp manifest.json release-assets/
 
+      - name: Show release assets
+        run: |
+          echo "Listing release-assets directory:"
+          ls -R release-assets/
+
       - name: Create Release in Public Repo
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           TAG_NAME=${{ github.ref_name }}
-          gh release create "$TAG_NAME" release-assets/* \
+          # 明确指定要上传的文件扩展名，并排除辅助文件
+          FILES=$(find release-assets -maxdepth 1 -name "*.zip" -o -name "manifest.json")
+          echo "Files to upload: $FILES"
+          
+          gh release create "$TAG_NAME" $FILES \
             --repo qibiao17606170508/sph-app-releases \
             --title "$TAG_NAME" \
             --notes "Release $TAG_NAME" \
-            --generate-notes || echo "Release already exists or failed"
+            --generate-notes || \
+          gh release upload "$TAG_NAME" $FILES \
+            --repo qibiao17606170508/sph-app-releases --clobber
 
       - name: Update manifest in private repository
         run: |
@@ -153,6 +167,3 @@ jobs:
           git add manifest.json
           git commit -m "chore: update manifest.json for ${GITHUB_REF#refs/tags/}" || echo "No changes"
           git push origin main
-
-      - name: Show release assets
-        run: ls -lah release-assets
