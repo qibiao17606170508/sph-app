@@ -151,8 +151,9 @@ jobs:
           if [ ! -f "$FILE_MAC" ]; then echo "Missing $FILE_MAC"; exit 1; fi
           if [ ! -f "$FILE_MAN" ]; then echo "Missing $FILE_MAN"; exit 1; fi
           
-          ./qshell fput "$QINIU_BUCKET" "releases/sph-app-windows-${TAG_NAME}.zip" "$FILE_WIN" --overwrite
-          ./qshell fput "$QINIU_BUCKET" "releases/sph-app-macos-${TAG_NAME}.zip" "$FILE_MAC" --overwrite
+          # 使用 --resumable_apiv2 进行分片并发上传，大幅提升大文件上传速度
+          ./qshell fput "$QINIU_BUCKET" "releases/sph-app-windows-${TAG_NAME}.zip" "$FILE_WIN" --overwrite --resumable_apiv2
+          ./qshell fput "$QINIU_BUCKET" "releases/sph-app-macos-${TAG_NAME}.zip" "$FILE_MAC" --overwrite --resumable_apiv2
           ./qshell fput "$QINIU_BUCKET" "releases/manifest.json" "$FILE_MAN" --overwrite
 
       - name: Show release assets
