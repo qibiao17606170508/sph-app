@@ -648,6 +648,65 @@ def api_delete_account(name):
 
 # ── Login: launch native browser window for QR scan ──
 
+@app.route('/api/accounts/<name>/open_browser', methods=['POST'])
+def api_open_browser(name):
+    """Launch a visible Chrome window to operate the account directly."""
+    try:
+        if not ensure_primary_account_name(name):
+            return jsonify({'error': '当前为单账号模式，仅支持主账号'}), 403
+        acct = getAccount(name)
+        if acct is None:
+            return jsonify({'error': '账号不存在'}), 404
+
+        if active_contexts.get(name) is not None:
+            with _browser_loop_lock:
+                loop = _browser_loops.get(name)
+            if loop is not None and not loop.is_closed():
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        _async_close_account_browser(name), loop
+                    ).result(timeout=90)
+                except Exception as e:
+                    logger.warn(f'open_browser: close existing browser: {e}')
+            else:
+                ex = active_contexts.pop(name, None)
+                if ex is not None:
+                    run_async_sync(ex.close())
+
+        run_async_thread(_open_browser_async(name, acct))
+        return jsonify({'message': '已打开账号浏览器'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+async def _open_browser_async(name, acct):
+    await unlock_profile(acct['profileDir'])
+
+    ctx = await init_browser(acct['profileDir'], headless=False)
+
+    if len(ctx.pages) == 0:
+        await ctx.close()
+        return
+
+    active_contexts[name] = ctx
+    page = ctx.pages[0]
+
+    try:
+        await page.goto('https://channels.weixin.qq.com/platform', wait_until='domcontentloaded')
+        
+        while active_contexts.get(name) is ctx:
+            if not ctx.pages:
+                break
+            await asyncio.sleep(2)
+    except Exception as e:
+        logger.error(f'Open browser error: {e}')
+    finally:
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+        if active_contexts.get(name) is ctx:
+            active_contexts.pop(name, None)
+
 
 @app.route('/api/accounts/<name>/login', methods=['POST'])
 def api_login(name):
@@ -685,14 +744,6 @@ def api_login(name):
 async def _login_async(name, acct):
     """Launch browser, wait for QR scan completion, then close."""
     await unlock_profile(acct['profileDir'])
-    if sys.platform == 'darwin':
-        import subprocess
-        try:
-            # 暴力清理同目录的残留 Chromium 进程
-            subprocess.run(['pkill', '-f', 'Chromium.*--user-data-dir.*browser-profiles'], 
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
 
     ctx = await init_browser(acct['profileDir'], headless=False)
 

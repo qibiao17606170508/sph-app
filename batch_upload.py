@@ -570,14 +570,29 @@ async def init_browser(profile_dir, headless=True):
 
 
 async def unlock_profile(profile_dir):
-    """Remove Chromium singleton lock files if present (stale lock blocks launch)."""
-    # Define lock files to look for
+    """Remove Chromium singleton lock files and kill residual processes if present."""
+    # 1. 尝试清理残留进程 (macOS / Linux)
+    if sys.platform != 'win32':
+        import subprocess
+        # 提取目录名用于匹配，比如 'browser-profile'
+        dir_name = os.path.basename(profile_dir)
+        try:
+            # 匹配包含该目录路径的 Chrome/Chromium 进程并杀死
+            # 更加通用的匹配模式：匹配任何包含 profile_dir 路径的进程
+            subprocess.run(['pkill', '-f', f'.*{dir_name}.*'], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    elif sys.platform == 'win32':
+        # Windows 下可以使用 taskkill 尝试清理，但通常 SingletonLock 的删除就足够了
+        pass
+
+    # 2. 删除锁文件
     lock_files = [
         'SingletonLock', 'SingletonCookie', 'SingletonSocket',
         'LOCK', '.lock'
     ]
     
-    # Check root profile dir and Default sub-dir
     dirs_to_check = [profile_dir]
     if os.path.exists(os.path.join(profile_dir, 'Default')):
         dirs_to_check.append(os.path.join(profile_dir, 'Default'))
@@ -594,7 +609,7 @@ async def unlock_profile(profile_dir):
                 except OSError as e:
                     logger.warn(f'Could not remove {fp}: {e}')
                     
-    # Clean macOS Chromium cache/lock files
+    # 3. 清理 macOS 特有的缓存/锁定
     if sys.platform == 'darwin':
         cache_path = os.path.join(profile_dir, 'Default', 'Cache')
         if os.path.isdir(cache_path):

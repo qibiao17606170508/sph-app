@@ -385,6 +385,41 @@ $("loginForm").addEventListener("submit", submitLogin);
 $("logoutBtn").addEventListener("click", logout);
 $("updateNowBtn").addEventListener("click", startDirectUpdate);
 
+if ($("openAccountBtn")) {
+  $("openAccountBtn").addEventListener("click", async () => {
+    const name = getSelectedAccountName();
+    if (!name) {
+      toast("未找到可用的视频号账号", "error");
+      return;
+    }
+    const acct = getAccountByName(name);
+    if (!acct) return;
+
+    if (acct.status !== "ready") {
+      loginAccount(name);
+      return;
+    }
+
+    const btn = $("openAccountBtn");
+    btn.disabled = true;
+    btn.textContent = "打开中...";
+    try {
+      const res = await api("/api/accounts/" + name + "/open_browser", { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast(data.error || "打开浏览器失败", "error");
+      } else {
+        toast("已打开浏览器窗口，可直接进行操作", "success");
+      }
+    } catch (e) {
+      toast("网络错误，打开浏览器失败", "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "打开账号";
+    }
+  });
+}
+
 /* ─── Socket.IO ─── */
 let socket;
 
