@@ -76,61 +76,38 @@ jobs:
         if: env.QINIU_ACCESS_KEY != '' && env.QINIU_SECRET_KEY != '' && env.QINIU_BUCKET != '' && startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          set -e
-          TAG_NAME=${GITHUB_REF#refs/tags/}
+          python -m pip install qiniu
+          python -c "
+          import os, sys, glob
+          from qiniu import Auth, put_file
           
-          # 获取系统对应的 qshell 下载地址
-          QS_VERSION="v2.14.0"
-          if [ "${{ matrix.platform_name }}" == "macos" ]; then
-            QS_URL="https://github.com/qiniu/qshell/releases/download/${QS_VERSION}/qshell-${QS_VERSION}-darwin-amd64.tar.gz"
-          else
-            # Windows 的 Git Bash 环境下可以运行 windows 版本的 qshell
-            QS_URL="https://github.com/qiniu/qshell/releases/download/${QS_VERSION}/qshell-${QS_VERSION}-windows-amd64.zip"
-          fi
+          ak = os.environ.get('QINIU_ACCESS_KEY', '').strip()
+          sk = os.environ.get('QINIU_SECRET_KEY', '').strip()
+          bucket = os.environ.get('QINIU_BUCKET', '').strip()
           
-          echo "Installing qshell from $QS_URL..."
-          if [ "${{ matrix.platform_name }}" == "macos" ]; then
-            curl -L -o qshell.tgz "$QS_URL"
-            tar -xzf qshell.tgz
-            chmod +x ./qshell
-            QSHELL_CMD="./qshell"
-          else
-            curl -L -o qshell.zip "$QS_URL"
-            unzip qshell.zip
-            QSHELL_CMD="./qshell.exe"
-          fi
+          zip_files = glob.glob('dist/*.zip')
+          if not zip_files:
+              print('Error: No zip file found in dist directory!')
+              sys.exit(1)
+              
+          file_path = zip_files[0]
+          file_name = os.path.basename(file_path)
+          key = f'releases/{file_name}'
           
-          echo "Configuring qshell account..."
-          # Windows 下 qshell.exe 可能会因为配置目录的斜杠问题导致保存 Token 失败
-          # 我们明确指定一下 qshell 的全局配置目录到当前工作空间
-          export QSHELL_HOME="$(pwd)/.qshell"
-          mkdir -p "$QSHELL_HOME"
+          print(f'Uploading {file_name} to Qiniu bucket: {bucket} ...')
           
-          # 在写入前，确保清理掉可能携带的换行符或空格（这是最容易引发 bad auth 的原因）
-          CLEAN_AK=$(echo -n "$QINIU_ACCESS_KEY" | tr -d '[:space:]')
-          CLEAN_SK=$(echo -n "$QINIU_SECRET_KEY" | tr -d '[:space:]')
+          q = Auth(ak, sk)
+          # 对于覆盖上传，需要指定 key，并可以设置同名文件覆盖策略
+          # 其实默认的 token 如果指定了 key 就是允许覆盖或对应 key 的上传
+          token = q.upload_token(bucket, key, 3600)
           
-          $QSHELL_CMD account "$CLEAN_AK" "$CLEAN_SK" gha
-          $QSHELL_CMD user cu gha
-          
-          # 找到打包好的 zip 文件
-          ZIP_FILE=$(find dist -maxdepth 1 -name "*.zip" | head -n 1)
-          if [ -z "$ZIP_FILE" ]; then
-            echo "Error: No zip file found in dist directory!"
-            exit 1
-          fi
-          
-          # 为了避免相对路径调用 qshell 找不到文件的问题，我们先获取 qshell 的绝对路径
-          QSHELL_ABS_PATH="$(pwd)/${QSHELL_CMD#./}"
-          
-          # 对于大文件，qshell rput 需要根据文件名和路径计算上传 token
-          # 之前因为路径包含 \ 或 / 导致计算的 token 与服务端不一致，出现 bad auth
-          # 最稳妥的办法是：切换到文件所在目录，直接上传纯文件名
-          cd "$(dirname "$ZIP_FILE")"
-          FILE_NAME=$(basename "$ZIP_FILE")
-          echo "Uploading $FILE_NAME to Qiniu bucket: $QINIU_BUCKET ..."
-          # 使用绝对路径调用 qshell
-          "$QSHELL_ABS_PATH" rput "$QINIU_BUCKET" "releases/$FILE_NAME" "$FILE_NAME" --overwrite
+          ret, info = put_file(token, key, file_path, version='v2')
+          if info.status_code == 200:
+              print('Upload successful!')
+          else:
+              print(f'Upload failed: {info}')
+              sys.exit(1)
+          "
 
   release:
     name: Finalize Release (Manifest & Public Repo)
@@ -188,23 +165,33 @@ jobs:
       - name: Upload Manifest to Qiniu
         if: env.QINIU_ACCESS_KEY != '' && env.QINIU_SECRET_KEY != '' && env.QINIU_BUCKET != ''
         run: |
-          set -e
-          QS_VERSION="v2.14.0"
-          curl -L -o qshell.tgz https://github.com/qiniu/qshell/releases/download/${QS_VERSION}/qshell-${QS_VERSION}-linux-amd64.tar.gz
-          tar -xzf qshell.tgz
-          chmod +x ./qshell
+          python -m pip install qiniu
+          python -c "
+          import os, sys
+          from qiniu import Auth, put_file
           
-          export QSHELL_HOME="$(pwd)/.qshell"
-          mkdir -p "$QSHELL_HOME"
+          ak = os.environ.get('QINIU_ACCESS_KEY', '').strip()
+          sk = os.environ.get('QINIU_SECRET_KEY', '').strip()
+          bucket = os.environ.get('QINIU_BUCKET', '').strip()
           
-          CLEAN_AK=$(echo -n "$QINIU_ACCESS_KEY" | tr -d '[:space:]')
-          CLEAN_SK=$(echo -n "$QINIU_SECRET_KEY" | tr -d '[:space:]')
+          file_path = 'release-assets/manifest.json'
+          if not os.path.exists(file_path):
+              print('Error: manifest.json not found!')
+              sys.exit(1)
+              
+          key = 'releases/manifest.json'
+          print(f'Uploading manifest.json to Qiniu bucket: {bucket} ...')
           
-          ./qshell account "$CLEAN_AK" "$CLEAN_SK" gha
-          ./qshell user cu gha
+          q = Auth(ak, sk)
+          token = q.upload_token(bucket, key, 3600)
           
-          # 上传非常小的 manifest.json
-          ./qshell rput "$QINIU_BUCKET" "releases/manifest.json" "manifest.json" --overwrite
+          ret, info = put_file(token, key, file_path, version='v2')
+          if info.status_code == 200:
+              print('Upload successful!')
+          else:
+              print(f'Upload failed: {info}')
+              sys.exit(1)
+          "
 
       - name: Create Release in Public Repo
         env:
