@@ -164,21 +164,21 @@ def open_desktop():
         window_params['icon'] = icon_path
 
     try:
-        webview.create_window(**window_params)
+        window = webview.create_window(**window_params)
+        
+        # 修复退出卡死：在窗口关闭时强制结束进程
+        def on_closed():
+            print('[退出] 窗口已关闭，正在强制清理所有后台进程...')
+            # 使用 os._exit(0) 暴力退出，防止 Flask 或 Playwright 挂起
+            os._exit(0)
+
+        window.events.closed += on_closed
+
         # 系统暗色模式下自动适配标题栏
         try:
             _apply_system_titlebar(window_params['title'])
         except Exception:
             pass
-        
-        # 修复退出卡死：在窗口关闭时强制结束进程
-        def on_closed():
-            print('[退出] 窗口已关闭，正在清理进程...')
-            os._exit(0)
-
-        window = webview.active_window()
-        if window:
-            window.events.closed += on_closed
 
         # 启动 webview，禁用调试快捷键以防冲突
         webview.start(debug=False)
