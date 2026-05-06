@@ -140,7 +140,11 @@ jobs:
           chmod +x ./qshell
           
           echo "Configuring qshell account..."
+          # qshell account 需要的是 AccessKey 和 SecretKey，以及一个本地的名称（这里叫 gha）
           ./qshell account "$QINIU_ACCESS_KEY" "$QINIU_SECRET_KEY" gha
+          
+          # 非常关键：在使用 qupload2 等命令前，有些情况下需要显式切一下刚才添加的 user
+          ./qshell user cu gha
           
           echo "Uploading assets to Qiniu bucket: $QINIU_BUCKET"
           FILE_WIN="release-assets/sph-app-windows-${TAG_NAME}.zip"
