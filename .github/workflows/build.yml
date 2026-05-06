@@ -101,7 +101,16 @@ jobs:
           fi
           
           echo "Configuring qshell account..."
-          $QSHELL_CMD account "$QINIU_ACCESS_KEY" "$QINIU_SECRET_KEY" gha
+          # Windows 下 qshell.exe 可能会因为配置目录的斜杠问题导致保存 Token 失败
+          # 我们明确指定一下 qshell 的全局配置目录到当前工作空间
+          export QSHELL_HOME="$(pwd)/.qshell"
+          mkdir -p "$QSHELL_HOME"
+          
+          # 在写入前，确保清理掉可能携带的换行符或空格（这是最容易引发 bad auth 的原因）
+          CLEAN_AK=$(echo -n "$QINIU_ACCESS_KEY" | tr -d '[:space:]')
+          CLEAN_SK=$(echo -n "$QINIU_SECRET_KEY" | tr -d '[:space:]')
+          
+          $QSHELL_CMD account "$CLEAN_AK" "$CLEAN_SK" gha
           $QSHELL_CMD user cu gha
           
           # 找到打包好的 zip 文件
@@ -177,7 +186,13 @@ jobs:
           tar -xzf qshell.tgz
           chmod +x ./qshell
           
-          ./qshell account "$QINIU_ACCESS_KEY" "$QINIU_SECRET_KEY" gha
+          export QSHELL_HOME="$(pwd)/.qshell"
+          mkdir -p "$QSHELL_HOME"
+          
+          CLEAN_AK=$(echo -n "$QINIU_ACCESS_KEY" | tr -d '[:space:]')
+          CLEAN_SK=$(echo -n "$QINIU_SECRET_KEY" | tr -d '[:space:]')
+          
+          ./qshell account "$CLEAN_AK" "$CLEAN_SK" gha
           ./qshell user cu gha
           
           # 上传非常小的 manifest.json
