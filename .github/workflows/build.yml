@@ -151,9 +151,57 @@ jobs:
           if [ ! -f "$FILE_MAC" ]; then echo "Missing $FILE_MAC"; exit 1; fi
           if [ ! -f "$FILE_MAN" ]; then echo "Missing $FILE_MAN"; exit 1; fi
           
-          # 使用 --resumable_apiv2 进行分片并发上传，大幅提升大文件上传速度
-          ./qshell fput "$QINIU_BUCKET" "releases/sph-app-windows-${TAG_NAME}.zip" "$FILE_WIN" --overwrite --resumable_apiv2
-          ./qshell fput "$QINIU_BUCKET" "releases/sph-app-macos-${TAG_NAME}.zip" "$FILE_MAC" --overwrite --resumable_apiv2
+          # qupload2 支持分片并发上传，适合 GitHub Actions 跨国传大文件
+          cat > /tmp/qiniu_upload_windows.json << 'EOF'
+          {
+            "src_dir": "RELEASE_DIR_PLACEHOLDER",
+            "file_list": ["WIN_PLACEHOLDER"],
+            "bucket": "BUCKET_PLACEHOLDER",
+            "key_prefix": "releases/",
+            "overwrite": true,
+            "upload_threshold": 104857600,
+            "part_size": 4194304,
+            "compute_hash": true,
+            "check_exists": true,
+            "check_hash": true,
+            "skip_file_sizes": 0,
+            "log_file": "/tmp/qupload_windows.log",
+            "log_level": "info",
+            "log_stdout": true,
+            "force": true
+          }
+          EOF
+          sed -e "s|RELEASE_DIR_PLACEHOLDER|$(dirname "$FILE_WIN")|g" \
+              -e "s|WIN_PLACEHOLDER|$FILE_WIN|g" \
+              -e "s|BUCKET_PLACEHOLDER|$QINIU_BUCKET|g" \
+              /tmp/qiniu_upload_windows.json > /tmp/qiniu_upload_windows_final.json
+          
+          cat > /tmp/qiniu_upload_mac.json << 'EOF'
+          {
+            "src_dir": "RELEASE_DIR_PLACEHOLDER",
+            "file_list": ["MAC_PLACEHOLDER"],
+            "bucket": "BUCKET_PLACEHOLDER",
+            "key_prefix": "releases/",
+            "overwrite": true,
+            "upload_threshold": 104857600,
+            "part_size": 4194304,
+            "compute_hash": true,
+            "check_exists": true,
+            "check_hash": true,
+            "skip_file_sizes": 0,
+            "log_file": "/tmp/qupload_mac.log",
+            "log_level": "info",
+            "log_stdout": true,
+            "force": true
+          }
+          EOF
+          sed -e "s|RELEASE_DIR_PLACEHOLDER|$(dirname "$FILE_MAC")|g" \
+              -e "s|MAC_PLACEHOLDER|$FILE_MAC|g" \
+              -e "s|BUCKET_PLACEHOLDER|$QINIU_BUCKET|g" \
+              /tmp/qiniu_upload_mac.json > /tmp/qiniu_upload_mac_final.json
+          
+          ./qshell qupload2 /tmp/qiniu_upload_windows_final.json
+          ./qshell qupload2 /tmp/qiniu_upload_mac_final.json
           ./qshell fput "$QINIU_BUCKET" "releases/manifest.json" "$FILE_MAN" --overwrite
 
       - name: Show release assets
