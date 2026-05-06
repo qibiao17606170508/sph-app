@@ -3,7 +3,6 @@ import json
 import subprocess
 import sys
 import re
-import os
 
 
 def fail(message):
@@ -21,17 +20,12 @@ def run_capture(cmd):
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.returncode, (result.stdout or "").strip(), (result.stderr or "").strip()
 def get_current_version():
-    path = "version.json"
-    if not os.path.exists(path):
-        fail(f"找不到 {path} 文件。")
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open("version.json", "r", encoding="utf-8") as f:
             data = json.load(f)
-            v = data.get("version", "1.0.0")
-            validate_version(v)
-            return v
-    except Exception as e:
-        fail(f"读取 version.json 失败: {e}")
+            return data.get("version", "1.0.0")
+    except Exception:
+        return "1.0.0"
 
 def save_version(version):
     with open("version.json", "w", encoding="utf-8") as f:
@@ -45,15 +39,6 @@ def validate_version(version):
 
 
 def ensure_git_repo_clean_enough():
-    # 0. 确保在 main 分支且代码是最新的
-    code, out, err = run_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    if out != "main":
-        fail(f"当前分支是 {out}，请切换到 main 分支后再发布。")
-
-    print("正在拉取远程最新代码...")
-    run_command(["git", "pull", "origin", "main"])
-
-    # 1. 检查未提交改动
     code, out, err = run_capture(["git", "status", "--porcelain"])
     if code != 0:
         fail(err or "无法读取 git 状态")
@@ -145,16 +130,6 @@ def main():
     tag_name = f"v{new_version}"
     if remote_tag_exists(tag_name):
         fail(f"远程标签 {tag_name} 已存在，请换一个新版本号。")
-
-    # 3.5 (可选) 本地打包自检
-    answer = input(f"是否在本地运行 build.py 进行打包自检？(y/N): ").strip().lower()
-    if answer in ("y", "yes"):
-        print("开始本地打包...")
-        run_command([sys.executable, "build.py"])
-        print("本地打包完成，请检查 dist/ 目录。")
-        answer = input("打包结果是否满意，继续发布？(Y/n): ").strip().lower()
-        if answer in ("n", "no"):
-            fail("已取消发布。")
 
     save_version(new_version)
     print(f"已更新 version.json 为 {new_version}")

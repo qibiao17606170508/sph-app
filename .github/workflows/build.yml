@@ -148,9 +148,9 @@ jobs:
         run: |
           cat release-assets/build_info_*.txt > combined_info.txt
           
-          VERSION=$(grep "version=" combined_info.txt | head -n 1 | cut -d'=' -f2 | tr -d '\r\n')
-          WIN_SHA=$(grep "windows_sha256=" combined_info.txt | cut -d'=' -f2 | tr -d '\r\n')
-          MAC_SHA=$(grep "macos_sha256=" combined_info.txt | cut -d'=' -f2 | tr -d '\r\n')
+          VERSION=$(grep "version=" combined_info.txt | head -n 1 | cut -d'=' -f2)
+          WIN_SHA=$(grep "windows_sha256=" combined_info.txt | cut -d'=' -f2)
+          MAC_SHA=$(grep "macos_sha256=" combined_info.txt | cut -d'=' -f2)
           TAG_NAME=${GITHUB_REF#refs/tags/}
           
           DOMAIN="${QINIU_BUCKET_DOMAIN}"
@@ -163,10 +163,10 @@ jobs:
             "latest_version": "${VERSION}",
             "min_supported_version": "1.0.0",
             "force": false,
-            "notes": "版本 v${VERSION} 发布。更新包含性能优化和稳定性提升。",
+            "notes": "版本 ${TAG_NAME} 发布。更新包含性能优化和稳定性提升。",
             "downloads": {
-              "windows": "${BASE}/sph-app-windows-v${VERSION}.zip",
-              "macos": "${BASE}/sph-app-macos-v${VERSION}.zip"
+              "windows": "${BASE}/sph-app-windows-${TAG_NAME}.zip",
+              "macos": "${BASE}/sph-app-macos-${TAG_NAME}.zip"
             },
             "sha256": {
               "windows": "${WIN_SHA}",

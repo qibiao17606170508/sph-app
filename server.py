@@ -180,11 +180,8 @@ def load_local_version_info():
         path = os.path.join(BASE_DIR, 'version.json')
     try:
         with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            logger.info(f"Loaded local version from {path}: {data.get('version')}")
-            return data
-    except Exception as e:
-        logger.error(f"Error loading local version from {path}: {e}")
+            return json.load(f)
+    except Exception:
         return {'version': '0.0.0'}
 
 
@@ -227,29 +224,12 @@ def urlopen_with_context(req, timeout=15):
 
 def fetch_remote_json(url, timeout=15):
     try:
-        logger.info(f"Fetching remote JSON from: {url}")
         req = urllib.request.Request(url, headers={'User-Agent': UPDATE_USER_AGENT})
         with urlopen_with_context(req, timeout=timeout) as resp:
-            raw_bytes = resp.read()
-            # 使用 utf-8-sig 处理可能存在的 BOM 头
-            raw = raw_bytes.decode('utf-8-sig', errors='ignore')
-            # 过滤掉非法的控制字符
-            raw = re.sub(r'[\x00-\x1F]+', '', raw)
-            logger.info(f"Raw response (sanitized, first 200 chars): {raw[:200]}...")
-        
-        if not raw.strip():
-            logger.error(f"Empty response from {url}")
-            return None
-            
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            logger.error(f"Invalid JSON format from {url}: not a dictionary")
-            return None
-            
-        logger.info(f"Successfully parsed remote JSON. latest_version: {data.get('latest_version')}")
-        return data
+            raw = resp.read().decode('utf-8', errors='ignore')
+        return json.loads(raw)
     except Exception as e:
-        logger.error(f"Error fetching remote JSON from {url}: {e}")
+        print(f"Error fetching remote JSON from {url}: {e}")
         return None
 
 
@@ -257,43 +237,33 @@ def resolve_update_info():
     cfg = load_update_config()
     version_info = load_local_version_info()
     current_version = str(version_info.get('version') or '0.0.0')
+    platform_name = get_platform_name()
     manifest_url = str(cfg.get('manifest_url') or '').strip()
     if not manifest_url:
         return {
             'enabled': False,
             'current_version': current_version,
-            'platform': get_platform_name(),
+            'platform': platform_name,
             'message': '未配置更新地址',
         }
 
-    # 添加随机参数防止缓存
-    sep = '&' if '?' in manifest_url else '?'
-    cache_busted_url = f"{manifest_url}{sep}_t={int(time.time())}"
-    
-    manifest = fetch_remote_json(cache_busted_url, timeout=20)
-    if manifest is None:
+    manifest = fetch_remote_json(manifest_url, timeout=20)
+    if not isinstance(manifest, dict) or not manifest:
         return {
             'enabled': False,
             'current_version': current_version,
-            'platform': get_platform_name(),
-            'message': '无法获取远程更新配置，请检查网络连接',
+            'platform': platform_name,
+            'manifest_url': manifest_url,
+            'message': '更新清单获取失败，请检查远端 manifest.json 是否可访问',
         }
 
-    platform_name = get_platform_name()
     latest_version = str(manifest.get('latest_version') or current_version)
     min_supported_version = str(manifest.get('min_supported_version') or latest_version)
     force = bool(manifest.get('force'))
     downloads = manifest.get('downloads') or {}
     platform_download = downloads.get(platform_name) if isinstance(downloads, dict) else None
-    
-    current_tuple = parse_version_tuple(current_version)
-    latest_tuple = parse_version_tuple(latest_version)
-    min_tuple = parse_version_tuple(min_supported_version)
-    
-    update_required = force or current_tuple < min_tuple
-    update_available = current_tuple < latest_tuple
-
-    logger.info(f"Update Check: current={current_version} ({current_tuple}), latest={latest_version} ({latest_tuple}), available={update_available}")
+    update_required = force or parse_version_tuple(current_version) < parse_version_tuple(min_supported_version)
+    update_available = parse_version_tuple(current_version) < parse_version_tuple(latest_version)
 
     return {
         'enabled': True,
