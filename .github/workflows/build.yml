@@ -151,45 +151,32 @@ jobs:
           if [ ! -f "$FILE_MAC" ]; then echo "Missing $FILE_MAC"; exit 1; fi
           if [ ! -f "$FILE_MAN" ]; then echo "Missing $FILE_MAN"; exit 1; fi
           
-          # qupload2 的 file_list 需要的是相对于 src_dir 的路径，不能是绝对路径或带有上层目录的路径
-          # 我们把工作目录切到 release-assets 里去传，这样就全变成纯文件名了
-          cat > /tmp/qiniu_upload_windows.json << EOF
-          {
-            "src_dir": "$(pwd)/release-assets",
-            "file_list": "windows_list.txt",
-            "bucket": "$QINIU_BUCKET",
-            "key_prefix": "releases/",
-            "overwrite": true,
-            "resumable_api_v2": true,
-            "resumable_api_v2_part_size": 4194304,
-            "put_threshold": 104857600,
-            "log_stdout": true
-          }
-          EOF
-          
-          cat > /tmp/qiniu_upload_mac.json << EOF
-          {
-            "src_dir": "$(pwd)/release-assets",
-            "file_list": "mac_list.txt",
-            "bucket": "$QINIU_BUCKET",
-            "key_prefix": "releases/",
-            "overwrite": true,
-            "resumable_api_v2": true,
-            "resumable_api_v2_part_size": 4194304,
-            "put_threshold": 104857600,
-            "log_stdout": true
-          }
-          EOF
-          
           echo "sph-app-windows-${TAG_NAME}.zip" > /tmp/windows_list.txt
           echo "sph-app-macos-${TAG_NAME}.zip" > /tmp/mac_list.txt
           
-          # 更新 json 里面的 file_list 路径
-          sed -i 's|"windows_list.txt"|"/tmp/windows_list.txt"|' /tmp/qiniu_upload_windows.json
-          sed -i 's|"mac_list.txt"|"/tmp/mac_list.txt"|' /tmp/qiniu_upload_mac.json
-          
-          ./qshell qupload2 --success-list /tmp/qupload_win_success.txt --failure-list /tmp/qupload_win_fail.txt -c /tmp/qiniu_upload_windows.json
-          ./qshell qupload2 --success-list /tmp/qupload_mac_success.txt --failure-list /tmp/qupload_mac_fail.txt -c /tmp/qiniu_upload_mac.json
+          # qupload2 的命令行参数，不再使用配置文件
+          ./qshell qupload2 \
+            --src-dir "$(pwd)/release-assets" \
+            --file-list /tmp/windows_list.txt \
+            --bucket "$QINIU_BUCKET" \
+            --key-prefix "releases/" \
+            --overwrite \
+            --resumable-api-v2 \
+            --resumable-api-v2-part-size 4194304 \
+            --put-threshold 104857600 \
+            --thread-count 4
+            
+          ./qshell qupload2 \
+            --src-dir "$(pwd)/release-assets" \
+            --file-list /tmp/mac_list.txt \
+            --bucket "$QINIU_BUCKET" \
+            --key-prefix "releases/" \
+            --overwrite \
+            --resumable-api-v2 \
+            --resumable-api-v2-part-size 4194304 \
+            --put-threshold 104857600 \
+            --thread-count 4
+            
           ./qshell fput "$QINIU_BUCKET" "releases/manifest.json" "$FILE_MAN" --overwrite
 
       - name: Show release assets
