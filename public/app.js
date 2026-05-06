@@ -296,11 +296,12 @@ function renderForceUpdate(info) {
   showUpdateShell();
 }
 
-function promptOptionalUpdate(info) {
+function promptOptionalUpdate(info, options = {}) {
+  const { force = false } = options;
   optionalUpdateInfo = info || null;
   if (!info || !info.available || info.required) return;
   const promptKey = getOptionalUpdatePromptKey(info);
-  if (!promptKey || promptKey === lastOptionalUpdatePromptKey) return;
+  if (!force && (!promptKey || promptKey === lastOptionalUpdatePromptKey)) return;
   lastOptionalUpdatePromptKey = promptKey;
   const notes = esc(info.notes || "发现新版本，建议及时更新。").replace(/\n/g, "<br>");
   const body = `检测到新版本 <strong>v${esc(info.latest_version || "-")}</strong>。<br>` + `当前版本: v${esc(info.current_version || currentVersion || "-")}<br><br>` + notes + "<br><br>是否现在更新？";
@@ -391,13 +392,13 @@ if ($("checkUpdateBtn")) {
     const originalText = btn.textContent;
     btn.disabled = true;
     btn.textContent = "检查中…";
-    
+
     try {
       const state = await checkForceUpdate();
       if (state && state.blocked) {
         // 已触发强更弹窗
       } else if (state && state.info && state.info.available) {
-        promptOptionalUpdate(state.info);
+        promptOptionalUpdate(state.info, { force: true });
       } else {
         toast("当前已经是最新版本", "success");
       }
