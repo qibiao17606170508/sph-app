@@ -181,6 +181,7 @@ jobs:
             --put-threshold 104857600 \
             --thread-count 4
             
+          # qshell fput 时，由于文件在 release-assets 下面，我们需要明确传给它目标 key，避免带有不需要的路径
           ./qshell fput "$QINIU_BUCKET" "releases/manifest.json" "$FILE_MAN" --overwrite
 
       - name: Show release assets
