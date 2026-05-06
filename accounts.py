@@ -14,6 +14,27 @@ DEFAULT_ACCOUNTS = [
 ]
 
 
+def _normalize_profile_dir(source_profile_dir):
+    """Keep the single-account profile inside the current app base dir.
+
+    Older versions may persist an absolute path that points to a previous
+    checkout/download location, which can leave Chromium locking a stale
+    directory forever. We migrate that profile into the current workspace.
+    """
+    target = BASE_PROFILE_DIR
+    incoming = (source_profile_dir or '').strip()
+    if not incoming or os.path.abspath(incoming) == os.path.abspath(target):
+        return target
+
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    if os.path.isdir(incoming) and not os.path.exists(target):
+        try:
+            shutil.copytree(incoming, target, dirs_exist_ok=True)
+        except OSError:
+            pass
+    return target
+
+
 def _normalize_single_account(accounts):
     items = accounts if isinstance(accounts, list) else []
     source = None
@@ -34,7 +55,7 @@ def _normalize_single_account(accounts):
             'status': source.get('status') or 'needs-login',
             'lastLogin': source.get('lastLogin'),
             'createdAt': source.get('createdAt'),
-            'profileDir': source.get('profileDir') or base['profileDir'],
+            'profileDir': _normalize_profile_dir(source.get('profileDir')),
         })
     base['name'] = PRIMARY_ACCOUNT_NAME
     return [base]
@@ -96,7 +117,7 @@ def deleteAccount(name):
 
 def updateAccount(name, updates):
     if name != PRIMARY_ACCOUNT_NAME:
-        raise Exception('Account "' + name + '" not found')
+        raise Exception('账号不存在：' + name)
     accounts = loadAccounts()
     for a in accounts:
         if a['name'] == name:
@@ -106,7 +127,7 @@ def updateAccount(name, updates):
             a.update(allowed)
             saveAccounts(accounts)
             return a
-    raise Exception('Account "' + name + '" not found')
+    raise Exception('账号不存在：' + name)
 
 
 def updateAccountStatus(name, status):

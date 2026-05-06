@@ -28,7 +28,7 @@ __all__ = [
     'init_browser', 'unlock_profile', 'login_flow', 'batch_upload', 'process_video',
     'preflight_records', 'load_csv', 'load_csv_from_string', 'validate_title',
     'write_results', 'load_published_titles',
-    'classify_error', 'is_login', 'wait_for_upload_with_progress', 'select_short_drama',
+    'classify_error', 'is_login', 'detect_login_state', 'wait_for_upload_with_progress', 'select_short_drama',
     'set_cover', 'hide_location', 'verify_publish', 'wait_until', 'handle_login_expired',
     'set_schedule_publish',
     'probe_video', 'logger', 'notify_user',
@@ -359,6 +359,99 @@ def is_login(url):
     return 'login' in url
 
 
+_STRONG_LOGGED_OUT_TEXTS = (
+    '扫码登录',
+    '微信扫码登录',
+    '请使用微信扫码',
+    '请在手机上确认登录',
+    '确认登录',
+    '二维码已失效',
+    '二维码已过期',
+    '二维码过期',
+    '重新获取二维码',
+    '重新获取',
+    '请先登录',
+    '登录后即可上传视频',
+    '登录后可上传视频',
+    '账号异常',
+    '帐号异常',
+)
+_WEAK_LOGGED_OUT_TEXTS = (
+    '未登录',
+    '重新登录',
+    '登录失效',
+    '登录态失效',
+)
+_LOGGED_IN_TEXTS = (
+    '内容管理',
+    '发表视频',
+    '直播管理',
+    '数据中心',
+    '数据助手',
+    '评论管理',
+    '创作者中心',
+    '收益数据',
+    '视频号助手',
+)
+_LOGGED_IN_SELECTORS = (
+    'input[type=file]',
+    '.input-editor',
+    '.weui-desktop-layout',
+    '.weui-desktop-side',
+    '.weui-desktop-layout__main',
+)
+
+
+def _normalize_page_text(text):
+    return re.sub(r'\s+', ' ', text or '').strip()
+
+
+def _find_text_matches(text, keywords):
+    return [kw for kw in keywords if kw and kw in text]
+
+
+async def _page_has_any_selector(page, selectors):
+    for selector in selectors:
+        try:
+            if await page.locator(selector).first.count() > 0:
+                return selector
+        except Exception:
+            pass
+    return ''
+
+
+async def detect_login_state(page):
+    """综合 URL、页面文案和后台元素判断当前是否仍处于登录状态。"""
+    current_url = page.url or ''
+    normalized_url = current_url.lower()
+    body_text = ''
+    try:
+        body_text = _normalize_page_text(await page.text_content('body') or '')
+    except Exception:
+        pass
+
+    strong_logged_out = _find_text_matches(body_text, _STRONG_LOGGED_OUT_TEXTS)
+    weak_logged_out = _find_text_matches(body_text, _WEAK_LOGGED_OUT_TEXTS)
+    logged_in_texts = _find_text_matches(body_text, _LOGGED_IN_TEXTS)
+    matched_selector = await _page_has_any_selector(page, _LOGGED_IN_SELECTORS)
+
+    if is_login(current_url):
+        return {'logged_in': False, 'reason': 'login_url', 'detail': current_url}
+    if strong_logged_out:
+        return {'logged_in': False, 'reason': 'login_text', 'detail': strong_logged_out[0]}
+    if matched_selector:
+        return {'logged_in': True, 'reason': 'app_selector', 'detail': matched_selector}
+    if '/platform' in normalized_url and logged_in_texts:
+        return {'logged_in': True, 'reason': 'app_text', 'detail': logged_in_texts[0]}
+    if len(logged_in_texts) >= 2:
+        return {'logged_in': True, 'reason': 'app_text', 'detail': logged_in_texts[0]}
+    if weak_logged_out and not logged_in_texts:
+        return {'logged_in': False, 'reason': 'login_text_weak', 'detail': weak_logged_out[0]}
+    if '/platform' in normalized_url and body_text:
+        return {'logged_in': True, 'reason': 'platform_url', 'detail': current_url}
+    return {'logged_in': not is_login(current_url), 'reason': 'fallback', 'detail': current_url}
+
+
 def upload_headless_from_env():
     """批量上传是否用无头 Chromium（无感、不弹窗）。默认无头；HEADLESS_UPLOAD=0/false/no/off 才有界面。"""
     raw = os.environ.get('HEADLESS_UPLOAD', '').strip().lower()
@@ -376,30 +469,76 @@ async def init_browser(profile_dir, headless=True):
     if _pw_path and os.path.isdir(_pw_path):
         os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', _pw_path)
     p = await async_playwright().start()
-    args = []
-    if headless:
-        args.append('--headless=new')
-    context = await p.chromium.launch_persistent_context(
-        profile_dir,
-        headless=headless,
-        args=args,
-        viewport={'width': 1440, 'height': 900},
-        locale='zh-CN'
-    )
+    args = [
+        '--disable-infobars',
+        '--disable-extensions',
+    ]
+    if sys.platform != 'darwin':
+        args += [
+            '--disable-gpu',
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+        ]
+    
+    # 强制清理可能导致崩溃的锁定目录
+    try:
+        if os.path.exists(profile_dir):
+            # 暴力尝试修复整个目录权限
+            if sys.platform == 'darwin':
+                subprocess.run(['chmod', '-R', '777', profile_dir], 
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+        
+    launch_kwargs = {
+        'user_data_dir': profile_dir,
+        'headless': headless,
+        'args': args,
+        'viewport': {'width': 1440, 'height': 900},
+        'locale': 'zh-CN',
+        'ignore_default_args': ['--enable-automation'],
+    }
+    # 本地 macOS 开发时优先使用系统 Chrome，避免 Playwright 自带 Chromium 在本机直接崩溃
+    if sys.platform == 'darwin' and not getattr(sys, 'frozen', False):
+        launch_kwargs['channel'] = 'chrome'
+
+    context = await p.chromium.launch_persistent_context(**launch_kwargs)
     return context
 
 
 async def unlock_profile(profile_dir):
     """Remove Chromium singleton lock files if present (stale lock blocks launch)."""
-    for fname in ('SingletonLock', 'SingletonCookie', 'SingletonSocket'):
-        fp = os.path.join(profile_dir, fname)
-        if os.path.lexists(fp):
-            logger.warn(f'Profile locked — removing {fname}...')
+    # Define lock files to look for
+    lock_files = [
+        'SingletonLock', 'SingletonCookie', 'SingletonSocket',
+        'LOCK', '.lock'
+    ]
+    
+    # Check root profile dir and Default sub-dir
+    dirs_to_check = [profile_dir]
+    if os.path.exists(os.path.join(profile_dir, 'Default')):
+        dirs_to_check.append(os.path.join(profile_dir, 'Default'))
+        
+    for d in dirs_to_check:
+        for fname in lock_files:
+            fp = os.path.join(d, fname)
+            if os.path.lexists(fp):
+                try:
+                    if os.path.islink(fp):
+                        os.unlink(fp)
+                    else:
+                        os.remove(fp)
+                except OSError as e:
+                    logger.warn(f'Could not remove {fp}: {e}')
+                    
+    # Clean macOS Chromium cache/lock files
+    if sys.platform == 'darwin':
+        cache_path = os.path.join(profile_dir, 'Default', 'Cache')
+        if os.path.isdir(cache_path):
             try:
-                os.unlink(fp)
-                logger.info('Profile unlocked')
-            except OSError as e:
-                logger.warn(f'Could not remove {fname}: {e}')
+                shutil.rmtree(cache_path, ignore_errors=True)
+            except Exception:
+                pass
 
 
 async def login_flow(browser_context):
@@ -3718,9 +3857,10 @@ async def process_video(browser_context, record):
         await page.goto('https://channels.weixin.qq.com/platform',
                         wait_until='domcontentloaded', timeout=30000)
         await page.wait_for_timeout(5000)
-        if is_login(page.url):
+        login_state = await detect_login_state(page)
+        if not login_state.get('logged_in'):
             result['status'] = 'failed'
-            result['error'] = 'Not logged in'
+            result['error'] = '当前未登录，请先扫码登录'
             result['_loginExpired'] = True
             result['_errorType'] = 'login-expired'
             return result
@@ -3813,7 +3953,7 @@ async def process_video(browser_context, record):
 
         if upload_result == 'aborted':
             result['status'] = 'failed'
-            result['error'] = 'Aborted by user'
+            result['error'] = '用户已手动停止'
             return result
         if upload_result in ('timeout', 'not_started', 'stuck_progress'):
             result['status'] = 'failed'
@@ -3824,7 +3964,7 @@ async def process_video(browser_context, record):
                     f'大文件请尽量用有线网络、H.264 MP4、或继续调大 UPLOAD_WAIT_MAX_SEC。'
                 )
             elif upload_result == 'not_started':
-                result['error'] = 'Upload never started'
+                result['error'] = '上传未开始，请重试'
             else:
                 result['error'] = (
                     '上传进度长时间停在同一百分比（界面会似「卡死」）；'
@@ -3834,9 +3974,10 @@ async def process_video(browser_context, record):
                 )
             return result
         await page.wait_for_timeout(5000)
-        if is_login(page.url):
+        login_state = await detect_login_state(page)
+        if not login_state.get('logged_in'):
             result['status'] = 'failed'
-            result['error'] = 'Login expired during upload'
+            result['error'] = '上传过程中登录已失效，请重新扫码登录'
             result['_loginExpired'] = True
             result['_errorType'] = 'login-expired'
             return result
@@ -3848,9 +3989,10 @@ async def process_video(browser_context, record):
         _wuf = getattr(page, '_wx_while_upload_fill', None) or {}
         # 上传途中可能已点过；再执行一次无妨（hide_location 内会判断已「不显示位置」）
         await hide_location(page)
-        if is_login(page.url):
+        login_state = await detect_login_state(page)
+        if not login_state.get('logged_in'):
             result['status'] = 'failed'
-            result['error'] = 'Login expired'
+            result['error'] = '登录已失效，请重新扫码登录'
             result['_loginExpired'] = True
             result['_errorType'] = 'login-expired'
             return result
@@ -4017,7 +4159,7 @@ async def batch_upload(browser_context, records, options=None):
                 'video_path': record.get('video_path', ''),
                 'title': record.get('title', ''),
                 'status': 'failed',
-                'error': 'Login expired',
+                'error': '登录已失效，请重新扫码登录',
             })
             continue
 

@@ -36,7 +36,7 @@ from batch_upload import (
     batch_upload,
     preflight_records,
     load_csv_from_string,
-    is_login,
+    detect_login_state,
     upload_headless_from_env,
     info_should_show_in_live_ui,
     logger as batch_logger,
@@ -445,7 +445,7 @@ def require_auth():
         return None
     if is_authenticated():
         return None
-    return jsonify({'error': 'unauthorized'}), 401
+    return jsonify({'error': '未登录或登录已失效'}), 401
 
 
 @socketio.on('connect')
@@ -633,7 +633,7 @@ def api_login(name):
             return jsonify({'error': '当前为单账号模式，仅支持主账号'}), 403
         acct = getAccount(name)
         if acct is None:
-            return jsonify({'error': 'Account not found'}), 404
+            return jsonify({'error': '账号不存在'}), 404
 
         # Close any existing context for this account（须在与创建 context 相同的 loop 上 close）
         if active_contexts.get(name) is not None:
@@ -652,7 +652,7 @@ def api_login(name):
                     run_async_sync(ex.close())
 
         run_async_thread(_login_async(name, acct))
-        return jsonify({'message': 'login started'})
+        return jsonify({'message': '已开始扫码登录'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -660,6 +660,15 @@ def api_login(name):
 async def _login_async(name, acct):
     """Launch browser, wait for QR scan completion, then close."""
     await unlock_profile(acct['profileDir'])
+    if sys.platform == 'darwin':
+        import subprocess
+        try:
+            # 暴力清理同目录的残留 Chromium 进程
+            subprocess.run(['pkill', '-f', 'Chromium.*--user-data-dir.*browser-profiles'], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
     ctx = await init_browser(acct['profileDir'], headless=False)
 
     if len(ctx.pages) == 0:
@@ -679,7 +688,8 @@ async def _login_async(name, acct):
         logger.info(f'Login window opened for {acct["label"]} (url: {page.url})')
 
         # 检查是否已经处于登录状态（不在 login 页面则已登录，只检查主页面）
-        login_done = not is_login(page.url)
+        login_state = await detect_login_state(page)
+        login_done = login_state.get('logged_in', False)
         if login_done:
             logger.info(f'Already logged in for {acct["label"]} (url: {page.url})')
 
@@ -689,7 +699,8 @@ async def _login_async(name, acct):
         while time.time() < deadline and not login_done:
             await asyncio.sleep(2)
 
-            if not is_login(page.url):
+            login_state = await detect_login_state(page)
+            if login_state.get('logged_in'):
                 login_done = True
                 break
 
@@ -759,7 +770,7 @@ def api_verify(name):
             return jsonify({'error': '当前为单账号模式，仅支持主账号'}), 403
         acct = getAccount(name)
         if acct is None:
-            return jsonify({'error': 'Account not found'}), 404
+            return jsonify({'error': '账号不存在'}), 404
 
         ctx = active_contexts.get(name)
         with _browser_loop_lock:
@@ -796,7 +807,7 @@ async def _verify_hot_path(name):
     """在创建 context 的同一条事件循环上验证（必须由 run_coroutine_threadsafe 投递到 _browser_loops[name]）。"""
     ctx = active_contexts.get(name)
     if ctx is None:
-        return {'name': name, 'valid': False, 'error': 'context missing', 'hint': '请刷新后重试。'}
+        return {'name': name, 'valid': False, 'error': '浏览器上下文丢失', 'hint': '请刷新后重试。'}
 
     if upload_state.get('running') and upload_state.get('account') == name:
         return {
@@ -821,7 +832,7 @@ async def _verify_hot_path(name):
         return {
             'name': name,
             'valid': False,
-            'error': str(last_err)[:400] if last_err else 'new_page failed',
+            'error': str(last_err)[:400] if last_err else '新建验证页面失败',
             'hint': (
                 '无法在已打开的浏览器里新建验证标签（见上方错误）。'
                 '若你确认视频已传完但脚本仍卡住，可先点「停止上传」或在本账号卡片点「关闭浏览器」，再重新点「验证」。'
@@ -835,8 +846,8 @@ async def _verify_hot_path(name):
             timeout=20000,
         )
         await page.wait_for_timeout(1500)
-        current_url = page.url
-        expired = is_login(current_url)
+        login_state = await detect_login_state(page)
+        expired = not login_state.get('logged_in', False)
         if expired:
             updateAccountStatus(name, 'needs-login')
         else:
@@ -874,24 +885,47 @@ async def _verify_async(name, acct):
             ),
         }
 
+    # 强力解锁 Profile (不仅清理文件，还要清理可能残留的进程)
     await unlock_profile(acct['profileDir'])
+    if sys.platform == 'darwin':
+        import subprocess
+        try:
+            # 暴力清理同目录的残留 Chromium 进程
+            subprocess.run(['pkill', '-f', 'Chromium.*--user-data-dir.*browser-profiles'], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
     try:
         ctx = await init_browser(acct['profileDir'], headless=True)
     except Exception as e:
-        logger.error(f'verify: launch browser failed: {e}')
-        return {
-            'name': name,
-            'valid': False,
-            'error': str(e),
-            'hint': '请确认没有其它 Chrome/Chromium 正在使用该账号资料目录，或重启应用后再试。',
-        }
+        if sys.platform == 'darwin':
+            logger.warn(f'verify: headless launch failed on macOS, retry headed: {e}')
+            try:
+                ctx = await init_browser(acct['profileDir'], headless=False)
+            except Exception as retry_e:
+                logger.error(f'verify: launch browser failed: {retry_e}')
+                return {
+                    'name': name,
+                    'valid': False,
+                    'error': str(retry_e),
+                    'hint': '浏览器进程启动即崩溃。请先关闭残留 Chrome，再重试；若仍失败，请使用新版本安装包。',
+                }
+        else:
+            logger.error(f'verify: launch browser failed: {e}')
+            return {
+                'name': name,
+                'valid': False,
+                'error': str(e),
+                'hint': '请确认没有其它 Chrome/Chromium 正在使用该账号资料目录，或重启应用后再试。',
+            }
     try:
         page = ctx.pages[0] if len(ctx.pages) > 0 else await ctx.new_page()
         await page.goto('https://channels.weixin.qq.com',
                         wait_until='commit', timeout=8000)
         await page.wait_for_timeout(1500)
-        current_url = page.url
-        expired = is_login(current_url)
+        login_state = await detect_login_state(page)
+        expired = not login_state.get('logged_in', False)
         if expired:
             updateAccountStatus(name, 'needs-login')
         else:
@@ -942,7 +976,7 @@ def api_close(name):
                 asyncio.ensure_future(_async_close_account_browser(name), loop=loop)
 
             loop.call_soon_threadsafe(_schedule)
-            return jsonify({'message': 'Browser closed'})
+            return jsonify({'message': '浏览器已关闭'})
 
         popped = active_contexts.pop(name, None)
         if popped is not None:
@@ -953,7 +987,7 @@ def api_close(name):
                 loop.call_soon_threadsafe(evt.set)
             except Exception:
                 pass
-        return jsonify({'message': 'Browser closed'})
+        return jsonify({'message': '浏览器已关闭'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1017,11 +1051,11 @@ async def _upload_async(account_name, csv_content, schedule_interval_min=None):
     """Async upload process."""
     acct = getAccount(account_name)
     if acct is None:
-        logger.error(f'Account not found: {account_name}')
+        logger.error(f'账号不存在: {account_name}')
         broadcast({
             'type': 'upload-end',
             'success': False,
-            'error': 'Account not found'
+            'error': '账号不存在'
         })
         return
 
@@ -1159,7 +1193,7 @@ async def _upload_async(account_name, csv_content, schedule_interval_min=None):
 @app.route('/api/upload/start', methods=['POST'])
 def api_upload_start():
     if upload_state['running']:
-        return jsonify({'error': 'Upload already running'}), 400
+        return jsonify({'error': '当前已有上传任务正在进行'}), 400
 
     data = request.get_json(force=True)
     account_name = (data.get('account') or PRIMARY_ACCOUNT_NAME).strip()
@@ -1173,11 +1207,11 @@ def api_upload_start():
     if not ensure_primary_account_name(account_name):
         return jsonify({'error': '当前为单账号模式，仅支持主账号上传'}), 403
     if not csv_content:
-        return jsonify({'error': 'csv content required'}), 400
+        return jsonify({'error': '缺少 CSV 内容'}), 400
 
     acct = getAccount(account_name)
     if acct is None:
-        return jsonify({'error': 'Account not found'}), 404
+        return jsonify({'error': '账号不存在'}), 404
 
     # Save for crash recovery
     with open(LAST_BATCH_PATH, 'w', encoding='utf-8') as f:
@@ -1191,7 +1225,7 @@ def api_upload_start():
     )
     t.start()
 
-    return jsonify({'message': 'Upload started'})
+    return jsonify({'message': '上传任务已开始'})
 
 
 @app.route('/api/upload/stop', methods=['POST'])
@@ -1214,7 +1248,7 @@ def api_upload_stop():
 
     upload_state['abort'] = True
     if not force:
-        return jsonify({'message': 'Stopping after current step'})
+        return jsonify({'message': '将在当前步骤完成后停止'})
 
     name = upload_state.get('account')
     closed = False
@@ -1285,7 +1319,7 @@ def api_upload_validate():
         data = request.get_json(force=True)
         csv_content = data.get('csv', '')
         if not csv_content:
-            return jsonify({'error': 'csv required'}), 400
+            return jsonify({'error': '缺少 CSV 内容'}), 400
         records = load_csv_from_string(csv_content)
         validated = preflight_records(records)
         results = []
@@ -1364,15 +1398,15 @@ def api_upload_status():
 def api_upload_file():
     try:
         if 'file' not in request.files:
-            return jsonify({'error': 'no file uploaded'}), 400
+            return jsonify({'error': '未检测到上传文件'}), 400
         f = request.files['file']
         if f.filename == '':
-            return jsonify({'error': 'no file selected'}), 400
+            return jsonify({'error': '未选择文件'}), 400
 
         original_name = f.filename
-        # Generate safe filename: timestamp_random_original
-        rand_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-        safe_name = f'{int(time.time() * 1000)}_{rand_str}_{original_name}'
+        # Generate safe filename: yyyymmddHHMMSS_original
+        ts = datetime.now().strftime('%Y%m%d%H%M%S')
+        safe_name = f'{ts}_{original_name}'
         dest = os.path.join(UPLOADS_DIR, safe_name)
         f.save(dest)
         return jsonify({
@@ -1425,6 +1459,30 @@ def api_log():
         return jsonify(lines[-200:])
     except Exception:
         return jsonify([])
+
+
+# ── Cache ──
+
+
+@app.route('/api/cache/clear', methods=['POST'])
+def api_cache_clear():
+    try:
+        cleared = 0
+        if os.path.isdir(UPLOADS_DIR):
+            for name in os.listdir(UPLOADS_DIR):
+                fp = os.path.join(UPLOADS_DIR, name)
+                try:
+                    if os.path.isfile(fp):
+                        os.remove(fp)
+                        cleared += 1
+                    elif os.path.isdir(fp):
+                        shutil.rmtree(fp, ignore_errors=True)
+                        cleared += 1
+                except Exception:
+                    pass
+        return jsonify({'message': '缓存已清理', 'cleared': cleared})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 # ── Static files ──

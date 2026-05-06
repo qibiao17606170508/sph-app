@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#e2e8f0" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#020617" media="(prefers-color-scheme: dark)" />
-    <title>视频号批量上传</title>
+    <title>视频号批量上传 · 大金小怪</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
@@ -36,7 +36,7 @@
           </div>
           <div>
             <h1>欢迎回来</h1>
-            <p>登录后即可进入视频号批量上传后台</p>
+            <p>登录后即可进入视频号批量上传后台 · 大金小怪</p>
           </div>
         </div>
 
@@ -49,6 +49,10 @@
             <label for="loginPassword">密码</label>
             <input id="loginPassword" class="input auth-input" type="password" placeholder="请输入密码" autocomplete="current-password" />
           </div>
+          <label class="auth-remember">
+            <input id="rememberLogin" type="checkbox" />
+            <span>记住账号密码</span>
+          </label>
           <div class="auth-error" id="loginError"></div>
           <button id="loginSubmitBtn" class="btn btn-primary auth-submit" type="submit">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -103,7 +107,7 @@
             </svg>
             <span>结果</span>
           </button>
-          <button class="nav-item" data-view="logs">
+          <button class="nav-item" data-view="logs" style="display: none">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
               <polyline points="14 2 14 8 20 8" />
@@ -115,22 +119,23 @@
         <div class="sidebar-footer">
           <div class="sidebar-account-card" id="channelPanel">
             <div class="sidebar-account-head">
+              <div class="sidebar-user-meta">
+                <span class="sidebar-user-label">当前登录</span>
+                <strong id="authUserName">-</strong>
+              </div>
               <span class="sidebar-account-badge idle" id="channelStateBadge">未登录</span>
             </div>
             <div class="sidebar-account-actions">
               <button class="btn btn-primary btn-sm" id="channelLoginBtn" type="button">扫码</button>
               <button class="btn btn-ghost btn-sm" id="channelVerifyBtn" type="button">确认状态</button>
-              <button class="btn btn-ghost btn-sm sidebar-account-close" id="channelCloseBtn" type="button">关闭浏览器</button>
+              <button class="btn btn-ghost btn-sm" id="clearCacheBtn" type="button">清理缓存</button>
             </div>
           </div>
           <div class="sidebar-user" id="sidebarUser" style="display: none">
-            <div class="sidebar-user-meta">
-              <span class="sidebar-user-label">当前登录</span>
-              <strong id="authUserName">-</strong>
-            </div>
-            <button class="btn btn-ghost btn-sm" id="logoutBtn" type="button">退出登录</button>
+            <button class="btn btn-ghost sidebar-logout-btn" id="logoutBtn" type="button">退出登录</button>
           </div>
           <div class="sidebar-version" id="sidebarVersion"></div>
+          <div class="sidebar-signature">大金小怪</div>
         </div>
       </aside>
 
@@ -407,6 +412,15 @@
 
     <!-- Toast container -->
     <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Fullscreen loading -->
+    <div id="loadingOverlay" class="loading-overlay" style="display: none">
+      <div class="loading-card">
+        <div class="loading-spinner"></div>
+        <div class="loading-title" id="loadingTitle">处理中…</div>
+        <div class="loading-text" id="loadingText">请稍候，正在为你确认账号状态</div>
+      </div>
+    </div>
 
     <!-- Modal -->
     <div id="modalOverlay" class="modal-overlay" style="display: none">

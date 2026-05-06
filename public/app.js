@@ -21,6 +21,8 @@ const WINDOW_RECHECK_THROTTLE_MS = 30 * 1000;
 let windowCheckInFlight = null;
 let lastWindowCheckAt = 0;
 let lastOptionalUpdatePromptKey = "";
+const REMEMBER_LOGIN_KEY = "remember_login_credentials";
+let accountVerifyLoading = false;
 /** 当前批次开始上传时的条目 id 顺序（与后端 current 下标一致），用于发表后从队列移除 */
 let uploadOrderIds = [];
 
@@ -56,6 +58,37 @@ function setLoginError(message) {
   if (!el) return;
   el.textContent = message || "";
   el.style.display = message ? "block" : "none";
+}
+
+function showLoadingOverlay(title, text) {
+  $("loadingTitle").textContent = title || "处理中…";
+  $("loadingText").textContent = text || "请稍候";
+  $("loadingOverlay").style.display = "flex";
+}
+
+function hideLoadingOverlay() {
+  $("loadingOverlay").style.display = "none";
+}
+
+function loadRememberedLogin() {
+  try {
+    const raw = localStorage.getItem(REMEMBER_LOGIN_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    $("loginUsername").value = data.username || "";
+    $("loginPassword").value = data.password || "";
+    $("rememberLogin").checked = Boolean(data.username || data.password);
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function persistRememberedLogin(username, password) {
+  if (!$("rememberLogin").checked) {
+    localStorage.removeItem(REMEMBER_LOGIN_KEY);
+    return;
+  }
+  localStorage.setItem(REMEMBER_LOGIN_KEY, JSON.stringify({ username: username || "", password: password || "" }));
 }
 
 function setUpdateError(message) {
@@ -218,7 +251,8 @@ async function submitLogin(event) {
     }
     const data = await res.json();
     authResolved = true;
-    $("loginPassword").value = "";
+    persistRememberedLogin(username, password);
+    if (!$("rememberLogin").checked) $("loginPassword").value = "";
     await enterAuthedApp(data.user);
     toast("登录成功", "success");
   } catch (e) {
@@ -243,7 +277,7 @@ async function logout() {
   setStatus("idle", "未登录");
   $("liveLog").textContent = "";
   setLoginError("");
-  $("loginPassword").value = "";
+  if (!$("rememberLogin").checked) $("loginPassword").value = "";
   $("loginUsername").focus();
 }
 
@@ -480,8 +514,7 @@ function updateAccountPanel() {
   const badge = $("channelStateBadge");
   const loginBtn = $("channelLoginBtn");
   const verifyBtn = $("channelVerifyBtn");
-  const closeBtn = $("channelCloseBtn");
-  if (!badge || !loginBtn || !verifyBtn || !closeBtn) return;
+  if (!badge || !loginBtn || !verifyBtn) return;
 
   let badgeText = "未登录";
   let badgeClass = "idle";
@@ -497,8 +530,9 @@ function updateAccountPanel() {
   badge.className = "sidebar-account-badge " + badgeClass;
   badge.textContent = badgeText;
   loginBtn.disabled = loginLock;
-  verifyBtn.disabled = loginLock;
-  closeBtn.disabled = false;
+  verifyBtn.disabled = loginLock || accountVerifyLoading;
+  verifyBtn.classList.remove("btn-loading");
+  verifyBtn.textContent = "确认状态";
   loginBtn.textContent = loginLock ? "等待扫码…" : acct && acct.status === "ready" ? "重新登录" : "扫码登录";
 }
 
@@ -1195,8 +1229,27 @@ function onProgress(data) {
 // Clean server-renamed filename: "1680000000_a1b2c3_video.mp4" → "video.mp4"
 function cleanUploadName(filePath) {
   const name = (filePath || "").split(/[\\/]/).pop();
-  return name.replace(/^\d+_[a-z0-9]{6}_/, "");
+  // New pattern: yyyymmddHHMMSS_video.mp4
+  return name.replace(/^\d{14}_/, "");
 }
+
+// ─── Clear cache (uploads) ───
+(() => {
+  const btn = $("clearCacheBtn");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    showModal("清理缓存", "确认清除缓存？", async () => {
+      try {
+        const res = await api("/api/cache/clear", { method: "POST", body: JSON.stringify({}) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "清理失败");
+        toast("缓存已清除", "success");
+      } catch (e) {
+        toast(e.message || "清理失败", "error");
+      }
+    });
+  });
+})();
 
 async function retryFailed() {
   const failed = entries.filter((e) => e._uploadStatus === "fail");
@@ -1338,24 +1391,13 @@ $("channelVerifyBtn").addEventListener("click", () => {
   verifyAccount(getSelectedAccountName());
 });
 
-$("channelCloseBtn").addEventListener("click", async () => {
-  try {
-    const res = await api(`/api/accounts/${getSelectedAccountName()}/close`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      return toast(data.error || "关闭浏览器失败", "error");
-    }
-    loginLock = false;
-    pendingLoginAccountName = "";
-    updateAccountPanel();
-    toast("已关闭当前登录浏览器窗口", "success");
-  } catch (e) {
-    toast("关闭浏览器失败: " + e.message, "error");
+(() => {
+  const closeBtn = $("channelCloseBtn");
+  if (closeBtn) {
+    closeBtn.style.display = "none";
+    closeBtn.disabled = true;
   }
-});
+})();
 
 function updateAccountStatus() {
   const acct = getPrimaryAccount();
@@ -1371,10 +1413,12 @@ function updateAccountStatus() {
 async function verifyAccount(name, options = {}) {
   const { silent = false, buttonless = false, forceToastOnInvalid = false } = options;
   if (accountVerifyPromises.has(name)) return accountVerifyPromises.get(name);
-  const card = buttonless ? null : document.querySelector(`[data-verify="${esc(name)}"]`);
+  const card = buttonless ? null : $("channelVerifyBtn");
   if (card) {
+    accountVerifyLoading = true;
+    updateAccountPanel();
     card.disabled = true;
-    card.textContent = "验证中…";
+    showLoadingOverlay("正在确认状态…", "请稍候，正在为你确认当前账号状态");
   }
 
   const task = (async () => {
@@ -1405,8 +1449,10 @@ async function verifyAccount(name, options = {}) {
       return false;
     } finally {
       if (card) {
+        accountVerifyLoading = false;
+        updateAccountPanel();
         card.disabled = false;
-        card.textContent = "验证";
+        hideLoadingOverlay();
       }
       accountVerifyPromises.delete(name);
     }
@@ -1553,26 +1599,6 @@ $("logToggle").addEventListener("click", function () {
 });
 
 /* ═══════════════════════════════════════════════
-   KEYBOARD SHORTCUTS
-   ═══════════════════════════════════════════════ */
-document.addEventListener("keydown", function (e) {
-  if (!authUser) return;
-  // Ctrl+Enter: start upload (from upload view)
-  if (e.ctrlKey && e.key === "Enter") {
-    if (currentView === "upload" && !uploadRunning && entries.length > 0) {
-      e.preventDefault();
-      startUpload();
-    }
-  }
-  // Ctrl+1..4: switch views
-  const viewMap = { 1: "dashboard", 2: "upload", 3: "results", 4: "logs" };
-  if (e.ctrlKey && viewMap[e.key]) {
-    e.preventDefault();
-    switchView(viewMap[e.key]);
-  }
-});
-
-/* ═══════════════════════════════════════════════
    THEME — auto-sync system preference
    优先级: localStorage 显式选择 > 系统设置
    ═══════════════════════════════════════════════ */
@@ -1641,12 +1667,21 @@ document.addEventListener("visibilitychange", () => {
    INIT
    ═══════════════════════════════════════════════ */
 (async function initApp() {
-  runWindowOpenChecks({ force: true }).then(() => {
-    if (!authUser) $("loginUsername").focus();
-  }).catch((e) => {
-    console.error("Init check error:", e);
-    checkAuth().then(() => {
-      if (!authUser) $("loginUsername").focus();
+  loadRememberedLogin();
+  runWindowOpenChecks({ force: true })
+    .then(() => {
+      if (!authUser) {
+        if ($("loginPassword").value) $("loginPassword").focus();
+        else $("loginUsername").focus();
+      }
+    })
+    .catch((e) => {
+      console.error("Init check error:", e);
+      checkAuth().then(() => {
+        if (!authUser) {
+          if ($("loginPassword").value) $("loginPassword").focus();
+          else $("loginUsername").focus();
+        }
+      });
     });
-  });
 })();

@@ -4,7 +4,6 @@ import sys
 import time
 import threading
 import webbrowser
-import signal
 
 # 确保在可写数据目录运行
 _BASE = os.environ.get('APP_BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
@@ -135,7 +134,6 @@ def start_server():
 def open_desktop():
     """尝试用 pywebview 打开桌面窗口，失败则回退到浏览器"""
     configure_webview()
-
     try:
         import webview
     except ImportError:
@@ -150,13 +148,15 @@ def open_desktop():
         return False
 
     window_params = {
-        'title': '视频号批量上传',
+        'title': '视频号批量上传 · 大金小怪',
         'url': f'http://127.0.0.1:{PORT}',
         'width': 1200,
         'height': 800,
         'min_size': (900, 650),
         'resizable': True,
         'confirm_close': False,
+        'focus': True,
+        'text_select': True,
     }
 
     icon_path = get_icon_path()
@@ -164,24 +164,34 @@ def open_desktop():
         window_params['icon'] = icon_path
 
     try:
-        window = webview.create_window(**window_params)
-        
-        # 修复退出卡死：在窗口关闭时强制结束进程
-        def on_closed():
-            print('[退出] 窗口已关闭，正在强制清理所有后台进程...')
-            # 使用 os._exit(0) 暴力退出，防止 Flask 或 Playwright 挂起
-            os._exit(0)
-
-        window.events.closed += on_closed
-
+        _window = webview.create_window(**window_params)
         # 系统暗色模式下自动适配标题栏
         try:
             _apply_system_titlebar(window_params['title'])
         except Exception:
             pass
 
-        # 启动 webview，禁用调试快捷键以防冲突
-        webview.start(debug=False)
+        menu = []
+        if sys.platform == 'darwin':
+            try:
+                menu = [
+                    webview.menu.Menu('编辑', [
+                        webview.menu.MenuAction('复制', lambda: None),
+                        webview.menu.MenuAction('粘贴', lambda: None),
+                        webview.menu.MenuAction('剪切', lambda: None),
+                        webview.menu.MenuAction('全选', lambda: None),
+                    ])
+                ]
+            except Exception:
+                menu = []
+
+        # macOS 下关闭 private_mode，恢复更接近原生浏览器的焦点/键盘行为
+        webview.start(
+            debug=False,
+            private_mode=False,
+            storage_path=os.path.join(_BASE, 'webview-storage'),
+            menu=menu,
+        )
         return True
     except Exception as e:
         print(f'[错误] 桌面窗口启动失败: {e}')
@@ -209,10 +219,16 @@ def main():
     _server_ready.wait(timeout=10)
 
     # 尝试 pywebview 桌面窗口
-    if not open_desktop():
+    desktop_started = open_desktop()
+    if not desktop_started:
         print('[提示] pywebview 未安装，使用浏览器打开')
         print(f'[启动] 打开 http://localhost:{PORT}')
         webbrowser.open(f'http://localhost:{PORT}')
+    else:
+        # pywebview.start 在窗口关闭后才返回；此时直接结束主进程，
+        # 不再继续等待后台 SocketIO 线程，避免点 X 后进程卡死。
+        print('[关闭] 桌面窗口已关闭')
+        return
 
     # 保持主进程存活
     try:
