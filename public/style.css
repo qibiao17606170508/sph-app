@@ -361,6 +361,14 @@ body::after {
   white-space: nowrap;
 }
 
+.sidebar-version-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+
 .sidebar-version {
   color: var(--text-tertiary);
   font-size: 11px;

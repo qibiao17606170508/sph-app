@@ -385,6 +385,31 @@ $("loginForm").addEventListener("submit", submitLogin);
 $("logoutBtn").addEventListener("click", logout);
 $("updateNowBtn").addEventListener("click", startDirectUpdate);
 
+if ($("checkUpdateBtn")) {
+  $("checkUpdateBtn").addEventListener("click", async () => {
+    const btn = $("checkUpdateBtn");
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "检查中…";
+    
+    try {
+      const state = await checkForceUpdate();
+      if (state && state.blocked) {
+        // 已触发强更弹窗
+      } else if (state && state.info && state.info.available) {
+        promptOptionalUpdate(state.info);
+      } else {
+        toast("当前已经是最新版本", "success");
+      }
+    } catch (e) {
+      toast("检查更新失败，请检查网络", "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  });
+}
+
 if ($("openAccountBtn")) {
   $("openAccountBtn").addEventListener("click", async () => {
     const name = getSelectedAccountName();

@@ -593,21 +593,42 @@ async def init_browser(profile_dir, headless=True):
 
 async def unlock_profile(profile_dir):
     """Remove Chromium singleton lock files and kill residual processes if present."""
-    # 1. 尝试清理残留进程 (macOS / Linux)
+    # 1. 尝试清理残留进程
+    import subprocess
+    dir_name = os.path.basename(profile_dir)
+    
     if sys.platform != 'win32':
-        import subprocess
-        # 提取目录名用于匹配，比如 'browser-profile'
-        dir_name = os.path.basename(profile_dir)
         try:
-            # 匹配包含该目录路径的 Chrome/Chromium 进程并杀死
-            # 更加通用的匹配模式：匹配任何包含 profile_dir 路径的进程
             subprocess.run(['pkill', '-f', f'.*{dir_name}.*'], 
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
-    elif sys.platform == 'win32':
-        # Windows 下可以使用 taskkill 尝试清理，但通常 SingletonLock 的删除就足够了
-        pass
+    else:
+        # Windows 增强清理逻辑：找到所有启动参数包含 profile_dir 的进程并结束
+        try:
+            import psutil
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    cmdline = proc.info.get('cmdline')
+                    if not cmdline:
+                        continue
+                    # 检查命令行参数中是否包含 profile_dir 或 dir_name
+                    cmd_str = ' '.join(cmdline).lower()
+                    if dir_name.lower() in cmd_str or profile_dir.lower() in cmd_str:
+                        if 'chrome' in proc.info['name'].lower() or 'chromium' in proc.info['name'].lower():
+                            logger.info(f"  [Cleanup] Killing residual browser process (PID: {proc.info['pid']})")
+                            proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+        except ImportError:
+            # 如果没装 psutil，退回到 wmic 暴力清理（不够精准但有效）
+            try:
+                subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'], 
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(['taskkill', '/F', '/IM', 'chrome-headless-shell.exe', '/T'], 
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
 
     # 2. 删除锁文件
     lock_files = [
