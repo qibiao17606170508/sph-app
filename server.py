@@ -773,6 +773,16 @@ async def _login_async(name, acct):
         deadline = time.time() + 300
 
         while time.time() < deadline and not login_done:
+            # 如果用户手动关闭了浏览器或页面，立刻退出扫码状态
+            if page.is_closed() or not ctx.pages:
+                logger.info(f'Login window closed manually for {acct["label"]}')
+                broadcast({
+                    'type': 'login-result',
+                    'account': name,
+                    'result': 'closed'
+                })
+                return
+
             await asyncio.sleep(2)
 
             login_state = await detect_login_state(page)

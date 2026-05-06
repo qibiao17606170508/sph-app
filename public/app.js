@@ -477,6 +477,7 @@ function connectWS() {
       updateAccountPanel();
       if (d.result === "expired") toast("二维码已过期，请重试", "warn");
       else if (d.result === "timeout") toast("登录超时，请重试", "warn");
+      else if (d.result === "closed") toast("扫码已取消", "info");
       else if (d.result === "error") toast("登录出错: " + (d.error || ""), "error");
     }
   });
