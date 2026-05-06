@@ -12,6 +12,7 @@ import os
 import random
 import re
 import shutil
+import ssl
 import string
 import subprocess
 import sys
@@ -24,6 +25,11 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request, send_from_directory, session
 from flask_socketio import SocketIO, emit
+
+try:
+    import certifi
+except Exception:
+    certifi = None
 
 from accounts import (
     loadAccounts,
@@ -197,10 +203,30 @@ def get_platform_name():
     return sys.platform
 
 
+def create_ssl_context():
+    if certifi is not None:
+        try:
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+    return ssl.create_default_context()
+
+
+def urlopen_with_context(req, timeout=15):
+    target_url = ''
+    if isinstance(req, urllib.request.Request):
+        target_url = req.full_url or ''
+    else:
+        target_url = str(req or '')
+    if str(target_url).lower().startswith('https://'):
+        return urllib.request.urlopen(req, timeout=timeout, context=create_ssl_context())
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 def fetch_remote_json(url, timeout=15):
     try:
         req = urllib.request.Request(url, headers={'User-Agent': UPDATE_USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urlopen_with_context(req, timeout=timeout) as resp:
             raw = resp.read().decode('utf-8', errors='ignore')
         return json.loads(raw)
     except Exception as e:
@@ -253,7 +279,7 @@ def download_update_package(download_url, version):
     filename = os.path.basename(urllib.parse.urlparse(download_url).path) or f'update-{platform_name}-{version}.zip'
     local_path = os.path.join(DOWNLOADS_DIR, filename)
     req = urllib.request.Request(download_url, headers={'User-Agent': UPDATE_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=120) as resp, open(local_path, 'wb') as f:
+    with urlopen_with_context(req, timeout=120) as resp, open(local_path, 'wb') as f:
         shutil.copyfileobj(resp, f)
     return local_path
 
@@ -359,7 +385,7 @@ def validate_remote_auth_token(token):
         method='GET',
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_with_context(req, timeout=15) as resp:
             status_code = resp.getcode()
             raw = resp.read().decode('utf-8', errors='ignore')
     except urllib.error.HTTPError as e:
@@ -396,7 +422,7 @@ def _request_login(payload_bytes, content_type):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_with_context(req, timeout=15) as resp:
             return resp.getcode(), resp.read().decode('utf-8', errors='ignore')
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode('utf-8', errors='ignore')

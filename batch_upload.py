@@ -336,7 +336,7 @@ def classify_error(msg):
     low = msg.lower()
     if 'no files attached' in low or 'not accepted by any file input' in low:
         return 'upload-failed'
-    login_keywords = ['login', 'Login', 'Not logged in', '登录']
+    login_keywords = ['login', 'Login', '未登录', '登录']
     for k in login_keywords:
         if k in msg:
             return 'login-expired'
