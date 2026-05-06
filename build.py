@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 
+
 APP_NAME = 'sph-app'
 DISPLAY_NAME = '视频号批量上传'
 
