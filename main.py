@@ -430,7 +430,7 @@ def main():
     # 尝试 pywebview 桌面窗口
     desktop_started = open_desktop()
     if not desktop_started:
-        print('[提示] pywebview 未安装，使用浏览器打开')
+        print('[提示] 桌面窗口启动失败，回退为浏览器打开')
         print(f'[启动] 打开 http://localhost:{PORT}')
         webbrowser.open(f'http://localhost:{PORT}')
     else:

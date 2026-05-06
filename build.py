@@ -154,6 +154,8 @@ def build_pyinstaller_cmd(base, platform_name):
         '--add-data', f'app.ico{os.pathsep}.',
         '--collect-submodules', 'flask_socketio',
         '--collect-submodules', 'engineio.async_drivers.threading',
+        '--collect-all', 'webview',
+        '--copy-metadata', 'pywebview',
         '--copy-metadata', 'playwright',
         '--clean',
         '--noconfirm',

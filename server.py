@@ -145,7 +145,6 @@ shutdown_timer = None
 SHUTDOWN_DELAY = 30  # seconds
 AUTH_LOGIN_URL = 'http://47.114.217.61:9988/api/v1/admin/login'
 AUTH_USER_INFO_URL = 'http://47.114.217.61:9988/api/v1/admin/user-info'
-UPDATE_CONFIG_PATH = os.path.join(BASE_DIR, 'update.json')
 DOWNLOADS_DIR = os.path.join(BASE_DIR, 'downloads')
 UPDATE_USER_AGENT = 'wechat-channels-uploader/1.0'
 PUBLIC_API_PATHS = {
@@ -186,10 +185,11 @@ def load_local_version_info():
 
 
 def load_update_config():
-    if not os.path.exists(UPDATE_CONFIG_PATH):
-        return {}
+    path = os.path.join(RES_DIR, 'update.json')
+    if not os.path.exists(path):
+        path = os.path.join(BASE_DIR, 'update.json')
     try:
-        with open(UPDATE_CONFIG_PATH, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception:
         return {}
