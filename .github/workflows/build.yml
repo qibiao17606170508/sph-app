@@ -120,6 +120,9 @@ jobs:
             exit 1
           fi
           
+          # 为了避免相对路径调用 qshell 找不到文件的问题，我们先获取 qshell 的绝对路径
+          QSHELL_ABS_PATH="$(pwd)/${QSHELL_CMD#./}"
+          
           # 对于大文件，qshell rput 需要根据文件名和路径计算上传 token
           # 之前因为路径包含 \ 或 / 导致计算的 token 与服务端不一致，出现 bad auth
           # 最稳妥的办法是：切换到文件所在目录，直接上传纯文件名
@@ -127,7 +130,7 @@ jobs:
           FILE_NAME=$(basename "$ZIP_FILE")
           echo "Uploading $FILE_NAME to Qiniu bucket: $QINIU_BUCKET ..."
           # 使用绝对路径调用 qshell
-          "$(pwd)/../../$QSHELL_CMD" rput "$QINIU_BUCKET" "releases/$FILE_NAME" "$FILE_NAME" --overwrite
+          "$QSHELL_ABS_PATH" rput "$QINIU_BUCKET" "releases/$FILE_NAME" "$FILE_NAME" --overwrite
 
   release:
     name: Finalize Release (Manifest & Public Repo)
