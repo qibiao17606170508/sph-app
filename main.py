@@ -342,6 +342,10 @@ def open_desktop():
         window_params['icon'] = icon_path
 
     try:
+        # 在 Windows 上强制指定使用 edgechromium (WebView2) 引擎
+        # 如果系统没有安装 WebView2，webview.create_window / webview.start 就会抛出 WebViewException
+        gui = 'edgechromium' if sys.platform == 'win32' else None
+        
         _window = webview.create_window(**window_params)
         # 系统暗色模式下自动适配标题栏
         try:
@@ -365,6 +369,7 @@ def open_desktop():
 
         # macOS 下关闭 private_mode，恢复更接近原生浏览器的焦点/键盘行为
         webview.start(
+            gui=gui,
             debug=False,
             private_mode=False,
             storage_path=os.path.join(_BASE, 'webview-storage'),
@@ -373,7 +378,7 @@ def open_desktop():
         return True
     except Exception as e:
         print(f'[错误] 桌面窗口启动失败: {e}')
-        print('[提示] 将回退到浏览器模式')
+        print('[提示] 将回退到 Chrome App 模式')
         try:
             from datetime import datetime
             import traceback
