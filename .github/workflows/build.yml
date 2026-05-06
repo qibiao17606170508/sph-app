@@ -7,6 +7,10 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: utf-8
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  QINIU_ACCESS_KEY: ${{ secrets.QINIU_ACCESS_KEY }}
+  QINIU_SECRET_KEY: ${{ secrets.QINIU_SECRET_KEY }}
+  QINIU_BUCKET: ${{ secrets.QINIU_BUCKET }}
+  QINIU_BUCKET_DOMAIN: ${{ secrets.QINIU_BUCKET_DOMAIN }}
 
 on:
   workflow_dispatch:
@@ -68,8 +72,51 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
+      - name: Upload to Qiniu Kodo (Direct from build runner)
+        if: env.QINIU_ACCESS_KEY != '' && env.QINIU_SECRET_KEY != '' && env.QINIU_BUCKET != '' && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -e
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          
+          # 获取系统对应的 qshell 下载地址
+          QS_VERSION="v2.14.0"
+          if [ "${{ matrix.platform_name }}" == "macos" ]; then
+            QS_URL="https://github.com/qiniu/qshell/releases/download/${QS_VERSION}/qshell-${QS_VERSION}-darwin-amd64.tar.gz"
+          else
+            # Windows 的 Git Bash 环境下可以运行 windows 版本的 qshell
+            QS_URL="https://github.com/qiniu/qshell/releases/download/${QS_VERSION}/qshell-${QS_VERSION}-windows-amd64.zip"
+          fi
+          
+          echo "Installing qshell from $QS_URL..."
+          if [ "${{ matrix.platform_name }}" == "macos" ]; then
+            curl -L -o qshell.tgz "$QS_URL"
+            tar -xzf qshell.tgz
+            chmod +x ./qshell
+            QSHELL_CMD="./qshell"
+          else
+            curl -L -o qshell.zip "$QS_URL"
+            unzip qshell.zip
+            QSHELL_CMD="./qshell.exe"
+          fi
+          
+          echo "Configuring qshell account..."
+          $QSHELL_CMD account "$QINIU_ACCESS_KEY" "$QINIU_SECRET_KEY" gha
+          $QSHELL_CMD user cu gha
+          
+          # 找到打包好的 zip 文件
+          ZIP_FILE=$(find dist -name "*.zip" | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Error: No zip file found in dist directory!"
+            exit 1
+          fi
+          
+          FILE_NAME=$(basename "$ZIP_FILE")
+          echo "Uploading $FILE_NAME to Qiniu bucket: $QINIU_BUCKET ..."
+          $QSHELL_CMD rput "$QINIU_BUCKET" "releases/$FILE_NAME" "$ZIP_FILE" --overwrite
+
   release:
-    name: Create Release
+    name: Finalize Release (Manifest & Public Repo)
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -91,7 +138,6 @@ jobs:
 
       - name: Generate Manifest
         run: |
-          # 合并所有 build_info 文件
           cat release-assets/build_info_*.txt > combined_info.txt
           
           VERSION=$(grep "version=" combined_info.txt | head -n 1 | cut -d'=' -f2)
@@ -99,15 +145,9 @@ jobs:
           MAC_SHA=$(grep "macos_sha256=" combined_info.txt | cut -d'=' -f2)
           TAG_NAME=${GITHUB_REF#refs/tags/}
           
-          # 七牛外链域名（确保带协议）
           DOMAIN="${QINIU_BUCKET_DOMAIN}"
-          if [ -z "$DOMAIN" ]; then
-            echo "QINIU_BUCKET_DOMAIN is empty. Please set repository secret QINIU_BUCKET_DOMAIN"
-            exit 1
-          fi
-          if [[ "$DOMAIN" != http*://* ]]; then
-            DOMAIN="http://${DOMAIN}"
-          fi
+          if [ -z "$DOMAIN" ]; then exit 1; fi
+          if [[ "$DOMAIN" != http*://* ]]; then DOMAIN="http://${DOMAIN}"; fi
           BASE="${DOMAIN}/releases"
           
           cat > manifest.json <<EOF
@@ -128,78 +168,35 @@ jobs:
           EOF
           cp manifest.json release-assets/
 
-      - name: Upload to Qiniu Kodo
-        if: env.QINIU_ACCESS_KEY != '' && env.QINIU_SECRET_KEY != '' && env.QINIU_BUCKET != '' && env.QINIU_BUCKET_DOMAIN != ''
+      - name: Upload Manifest to Qiniu
+        if: env.QINIU_ACCESS_KEY != '' && env.QINIU_SECRET_KEY != '' && env.QINIU_BUCKET != ''
         run: |
           set -e
-          TAG_NAME=${{ github.ref_name }}
-          echo "Installing qshell..."
           QS_VERSION="v2.14.0"
           curl -L -o qshell.tgz https://github.com/qiniu/qshell/releases/download/${QS_VERSION}/qshell-${QS_VERSION}-linux-amd64.tar.gz
           tar -xzf qshell.tgz
           chmod +x ./qshell
           
-          echo "Configuring qshell account..."
-          # qshell account 需要的是 AccessKey 和 SecretKey，以及一个本地的名称（这里叫 gha）
           ./qshell account "$QINIU_ACCESS_KEY" "$QINIU_SECRET_KEY" gha
-          
-          # 非常关键：在使用 qupload2 等命令前，有些情况下需要显式切一下刚才添加的 user
           ./qshell user cu gha
           
-          echo "Uploading assets to Qiniu bucket: $QINIU_BUCKET"
-          FILE_WIN="sph-app-windows-${TAG_NAME}.zip"
-          FILE_MAC="sph-app-macos-${TAG_NAME}.zip"
-          FILE_MAN="manifest.json"
-          
-          cd release-assets
-          
-          if [ ! -f "$FILE_WIN" ]; then echo "Missing $FILE_WIN"; exit 1; fi
-          if [ ! -f "$FILE_MAC" ]; then echo "Missing $FILE_MAC"; exit 1; fi
-          if [ ! -f "$FILE_MAN" ]; then echo "Missing $FILE_MAN"; exit 1; fi
-          
-          # 使用 qshell rput (Resumable Put) 替代 qupload2，rput 是原生的单文件分片上传，支持大文件，不会有格式解析错误
-          echo "Uploading $FILE_WIN ..."
-          ../qshell rput "$QINIU_BUCKET" "releases/$FILE_WIN" "$FILE_WIN" --overwrite
-          
-          echo "Uploading $FILE_MAC ..."
-          ../qshell rput "$QINIU_BUCKET" "releases/$FILE_MAC" "$FILE_MAC" --overwrite
-          
-          echo "Uploading $FILE_MAN ..."
-          ../qshell rput "$QINIU_BUCKET" "releases/$FILE_MAN" "$FILE_MAN" --overwrite
-          
-          cd ..
-
-      - name: Show release assets
-        run: |
-          echo "Listing release-assets directory:"
-          ls -R release-assets/
+          # 上传非常小的 manifest.json
+          ./qshell rput "$QINIU_BUCKET" "releases/manifest.json" "manifest.json" --overwrite
 
       - name: Create Release in Public Repo
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           TAG_NAME=${{ github.ref_name }}
-          # 明确指定要上传的文件，注意路径包含 release-assets/
           FILES=$(find release-assets -maxdepth 1 \( -name "*.zip" -o -name "manifest.json" \))
-          echo "Files to upload:"
-          echo "$FILES"
           
-          # 检查文件是否存在
-          if [ -z "$FILES" ]; then
-            echo "Error: No files found to upload!"
-            exit 1
-          fi
-
-          # 创建 Release (如果不存在) 并上传文件
           gh release create "$TAG_NAME" \
             --repo qibiao17606170508/sph-app-releases \
             --title "$TAG_NAME" \
             --notes "Release $TAG_NAME" \
-            --generate-notes || echo "Release already exists, uploading files..."
+            --generate-notes || echo "Release already exists..."
           
-          # 强制上传/覆盖资产
           for file in $FILES; do
-            echo "Uploading $file..."
             gh release upload "$TAG_NAME" "$file" \
               --repo qibiao17606170508/sph-app-releases --clobber
           done
