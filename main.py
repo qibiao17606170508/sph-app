@@ -306,23 +306,12 @@ def wait_for_server_http(timeout=15):
 
 def open_desktop():
     """尝试用 pywebview 打开桌面窗口，失败则回退到浏览器"""
-    if sys.platform == 'win32':
-        try:
-            if not _server_ready.wait(timeout=10):
-                print('[错误] 服务启动超时')
-                return False
-            if not wait_for_server_http(timeout=15):
-                print('[错误] 服务页面加载超时')
-                return False
-        except Exception as e:
-            print(f'[错误] 等待服务时出错: {e}')
-            return False
-        return open_chrome_app()
-
     configure_webview()
     try:
         import webview
     except ImportError:
+        if sys.platform == 'win32':
+            return open_chrome_app()
         return False
 
     try:
@@ -384,7 +373,7 @@ def open_desktop():
         return True
     except Exception as e:
         print(f'[错误] 桌面窗口启动失败: {e}')
-        print('[提示] 将使用浏览器打开')
+        print('[提示] 将回退到浏览器模式')
         try:
             from datetime import datetime
             import traceback
@@ -395,6 +384,8 @@ def open_desktop():
                 f.write('\n')
         except Exception:
             pass
+        if sys.platform == 'win32':
+            return open_chrome_app()
         return False
 
 

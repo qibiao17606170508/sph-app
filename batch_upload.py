@@ -392,6 +392,10 @@ _LOGGED_IN_TEXTS = (
     '创作者中心',
     '收益数据',
     '视频号助手',
+    '首页',
+    '动态',
+    '私信',
+    '设置',
 )
 _LOGGED_IN_SELECTORS = (
     'input[type=file]',
@@ -399,6 +403,9 @@ _LOGGED_IN_SELECTORS = (
     '.weui-desktop-layout',
     '.weui-desktop-side',
     '.weui-desktop-layout__main',
+    '.menu-list',
+    '.channels-header',
+    '.avatar',
 )
 
 
@@ -435,21 +442,36 @@ async def detect_login_state(page):
     logged_in_texts = _find_text_matches(body_text, _LOGGED_IN_TEXTS)
     matched_selector = await _page_has_any_selector(page, _LOGGED_IN_SELECTORS)
 
-    if is_login(current_url):
-        return {'logged_in': False, 'reason': 'login_url', 'detail': current_url}
+    # 1. 如果明确出现“扫码登录”等强烈的未登录特征词，优先判断为未登录
     if strong_logged_out:
         return {'logged_in': False, 'reason': 'login_text', 'detail': strong_logged_out[0]}
+    
+    # 2. 如果 URL 是明确的 login 页面，判断为未登录
+    if is_login(current_url):
+        return {'logged_in': False, 'reason': 'login_url', 'detail': current_url}
+        
+    # 3. 如果出现了弱未登录词且没有任何已登录特征词，判断为未登录
+    if weak_logged_out and not logged_in_texts and not matched_selector:
+        return {'logged_in': False, 'reason': 'login_text_weak', 'detail': weak_logged_out[0]}
+
+    # 4. 如果找到了已登录的特征选择器（最可靠），判断为已登录
     if matched_selector:
         return {'logged_in': True, 'reason': 'app_selector', 'detail': matched_selector}
+        
+    # 5. 如果在 platform 路由下且找到了已登录的特征词
     if '/platform' in normalized_url and logged_in_texts:
         return {'logged_in': True, 'reason': 'app_text', 'detail': logged_in_texts[0]}
+        
+    # 6. 如果没有明确在 platform 下，但找到了多个已登录特征词
     if len(logged_in_texts) >= 2:
         return {'logged_in': True, 'reason': 'app_text', 'detail': logged_in_texts[0]}
-    if weak_logged_out and not logged_in_texts:
-        return {'logged_in': False, 'reason': 'login_text_weak', 'detail': weak_logged_out[0]}
-    if '/platform' in normalized_url and body_text:
+        
+    # 7. 如果在 platform 路由下，且没有任何未登录特征，默认认为是登录状态
+    if '/platform' in normalized_url and not strong_logged_out and not weak_logged_out:
         return {'logged_in': True, 'reason': 'platform_url', 'detail': current_url}
-    return {'logged_in': not is_login(current_url), 'reason': 'fallback', 'detail': current_url}
+        
+    # 8. 最后的回退策略：如果没有明确被识别为已登录，统统认为未登录，避免误判为“有效”
+    return {'logged_in': False, 'reason': 'fallback', 'detail': current_url}
 
 
 def upload_headless_from_env():
@@ -4265,15 +4287,13 @@ async def batch_upload(browser_context, records, options=None):
             on_progress({'current': i + 1, 'total': total,
                          'status': result['status'], 'title': record.get('title', '')})
 
-        # 排队：上一条已成功发表后，按下一条的「间隔(分钟)」等待再开始（最后一条不等待）
+        # 排队：上一条已成功发表后，固定等待 5 秒再开始下一条（最后一条不等待）
         if i + 1 < total and result.get('status') == 'published':
-            gap_min = record_schedule_interval_minutes(records[i + 1])
-            wait_sec = gap_min * 60
-            if wait_sec > 0:
-                logger.info(f'  批量排队：上一条已发表，等待 {gap_min} 分钟后开始下一条…')
-                if not await _async_sleep_interruptible(wait_sec, abort_signal):
-                    logger.warn('  批量排队等待中被中止，不再处理后续条目')
-                    break
+            wait_sec = 5
+            logger.info(f'  批量排队：上一条已发表，固定等待 {wait_sec} 秒后开始下一条…')
+            if not await _async_sleep_interruptible(wait_sec, abort_signal):
+                logger.warn('  批量排队等待中被中止，不再处理后续条目')
+                break
 
     return results
 

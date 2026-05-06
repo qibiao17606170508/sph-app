@@ -250,7 +250,7 @@
               <div class="field">
                 <label>间隔(分钟) <span class="field-optional">选填</span></label>
                 <input type="number" id="formInterval" class="input" min="0" max="1440" value="1" placeholder="0" />
-                <span class="field-hint">批量错开时间用；每条<strong>发表成功</strong>后按本值等待再传下一条。服务端规则：仅当定时时刻距现在<strong>大于 本值+5 分钟</strong>才在微信里勾选定时，否则立即发表。填 0 或未填按 1 分钟计。</span>
+                <span class="field-hint">仅用于计算「定时发表」时刻。每条发表成功后将<strong>固定等待 5 秒</strong>开始下一条。服务端规则：仅当定时时刻距现在<strong>大于 本值+5 分钟</strong>才在微信里勾选定时，否则立即发表。</span>
               </div>
             </div>
             <div class="form-actions">
