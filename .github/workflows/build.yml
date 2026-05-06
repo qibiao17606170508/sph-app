@@ -147,42 +147,27 @@ jobs:
           ./qshell user cu gha
           
           echo "Uploading assets to Qiniu bucket: $QINIU_BUCKET"
-          FILE_WIN="release-assets/sph-app-windows-${TAG_NAME}.zip"
-          FILE_MAC="release-assets/sph-app-macos-${TAG_NAME}.zip"
-          FILE_MAN="release-assets/manifest.json"
+          FILE_WIN="sph-app-windows-${TAG_NAME}.zip"
+          FILE_MAC="sph-app-macos-${TAG_NAME}.zip"
+          FILE_MAN="manifest.json"
+          
+          cd release-assets
           
           if [ ! -f "$FILE_WIN" ]; then echo "Missing $FILE_WIN"; exit 1; fi
           if [ ! -f "$FILE_MAC" ]; then echo "Missing $FILE_MAC"; exit 1; fi
           if [ ! -f "$FILE_MAN" ]; then echo "Missing $FILE_MAN"; exit 1; fi
           
-          echo "sph-app-windows-${TAG_NAME}.zip" > /tmp/windows_list.txt
-          echo "sph-app-macos-${TAG_NAME}.zip" > /tmp/mac_list.txt
+          # 使用 qshell rput (Resumable Put) 替代 qupload2，rput 是原生的单文件分片上传，支持大文件，不会有格式解析错误
+          echo "Uploading $FILE_WIN ..."
+          ../qshell rput "$QINIU_BUCKET" "releases/$FILE_WIN" "$FILE_WIN" --overwrite
           
-          # qupload2 的命令行参数，不再使用配置文件
-          ./qshell qupload2 \
-            --src-dir "$(pwd)/release-assets" \
-            --file-list /tmp/windows_list.txt \
-            --bucket "$QINIU_BUCKET" \
-            --key-prefix "releases/" \
-            --overwrite \
-            --resumable-api-v2 \
-            --resumable-api-v2-part-size 4194304 \
-            --put-threshold 104857600 \
-            --thread-count 4
-            
-          ./qshell qupload2 \
-            --src-dir "$(pwd)/release-assets" \
-            --file-list /tmp/mac_list.txt \
-            --bucket "$QINIU_BUCKET" \
-            --key-prefix "releases/" \
-            --overwrite \
-            --resumable-api-v2 \
-            --resumable-api-v2-part-size 4194304 \
-            --put-threshold 104857600 \
-            --thread-count 4
-            
-          # qshell fput 时，由于文件在 release-assets 下面，我们需要明确传给它目标 key，避免带有不需要的路径
-          ./qshell fput "$QINIU_BUCKET" "releases/manifest.json" "$FILE_MAN" --overwrite
+          echo "Uploading $FILE_MAC ..."
+          ../qshell rput "$QINIU_BUCKET" "releases/$FILE_MAC" "$FILE_MAC" --overwrite
+          
+          echo "Uploading $FILE_MAN ..."
+          ../qshell rput "$QINIU_BUCKET" "releases/$FILE_MAN" "$FILE_MAN" --overwrite
+          
+          cd ..
 
       - name: Show release assets
         run: |
