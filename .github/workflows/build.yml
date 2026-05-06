@@ -78,7 +78,7 @@ jobs:
         run: |
           python -m pip install qiniu
           python -c "
-          import os, sys, glob
+          import os, sys, glob, time
           from qiniu import Auth, put_file
           
           # 极度强力的清理：移除可能被用户误填的引号、空格、换行等
@@ -100,16 +100,27 @@ jobs:
           print(f'Uploading {file_name} to Qiniu bucket: {bucket} ...')
           
           q = Auth(ak, sk)
-          # 生成覆盖上传凭证，设置过期时间为 10 小时 (36000s)，防止大文件上传中途 Token 过期
-          token = q.upload_token(bucket, key, 36000)
           
-          # version='v2' 使用分片上传 v2，原生支持大文件
-          ret, info = put_file(token, key, file_path, version='v2')
-          if info.status_code == 200:
-              print('Upload successful!')
-          else:
-              print(f'Upload failed: {info}')
-              sys.exit(1)
+          # 带重试的上传逻辑，解决 504 Gateway Time-out
+          max_retries = 3
+          for attempt in range(max_retries):
+              # 每次重试重新生成 token
+              token = q.upload_token(bucket, key, 36000)
+              print(f'Attempt {attempt + 1}/{max_retries}...')
+              ret, info = put_file(token, key, file_path, version='v2')
+              
+              if info.status_code == 200:
+                  print('Upload successful!')
+                  sys.exit(0)
+              elif info.status_code == 504:
+                  print(f'Gateway timeout on attempt {attempt + 1}. Retrying in 10 seconds...')
+                  time.sleep(10)
+              else:
+                  print(f'Upload failed: {info}')
+                  sys.exit(1)
+                  
+          print('Max retries reached. Upload failed.')
+          sys.exit(1)
           "
 
   release:

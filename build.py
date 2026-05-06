@@ -150,6 +150,7 @@ def build_pyinstaller_cmd(base, platform_name):
         '--add-data', f'version.json{os.pathsep}.',
         '--add-data', f'accounts.json{os.pathsep}.',
         '--add-data', f'update.json{os.pathsep}.',
+        '--add-data', f'app.ico{os.pathsep}.',
         '--collect-submodules', 'flask_socketio',
         '--collect-submodules', 'engineio.async_drivers.threading',
         '--copy-metadata', 'playwright',
