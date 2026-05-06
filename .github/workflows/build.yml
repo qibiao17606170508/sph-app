@@ -73,6 +73,11 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    env:
+      QINIU_ACCESS_KEY: ${{ secrets.QINIU_ACCESS_KEY }}
+      QINIU_SECRET_KEY: ${{ secrets.QINIU_SECRET_KEY }}
+      QINIU_BUCKET: ${{ secrets.QINIU_BUCKET }}
+      QINIU_BUCKET_DOMAIN: ${{ secrets.QINIU_BUCKET_DOMAIN }}
 
     steps:
       - name: Checkout
@@ -93,7 +98,17 @@ jobs:
           WIN_SHA=$(grep "windows_sha256=" combined_info.txt | cut -d'=' -f2)
           MAC_SHA=$(grep "macos_sha256=" combined_info.txt | cut -d'=' -f2)
           TAG_NAME=${GITHUB_REF#refs/tags/}
-          PUBLIC_REPO="qibiao17606170508/sph-app-releases"
+          
+          # 七牛外链域名（确保带协议）
+          DOMAIN="${QINIU_BUCKET_DOMAIN}"
+          if [ -z "$DOMAIN" ]; then
+            echo "QINIU_BUCKET_DOMAIN is empty. Please set repository secret QINIU_BUCKET_DOMAIN"
+            exit 1
+          fi
+          if [[ "$DOMAIN" != http*://* ]]; then
+            DOMAIN="http://${DOMAIN}"
+          fi
+          BASE="${DOMAIN}/releases"
           
           cat > manifest.json <<EOF
           {
@@ -102,8 +117,8 @@ jobs:
             "force": false,
             "notes": "版本 ${TAG_NAME} 发布。更新包含性能优化和稳定性提升。",
             "downloads": {
-              "windows": "https://github.com/${PUBLIC_REPO}/releases/download/${TAG_NAME}/sph-app-windows-${TAG_NAME}.zip",
-              "macos": "https://github.com/${PUBLIC_REPO}/releases/download/${TAG_NAME}/sph-app-macos-${TAG_NAME}.zip"
+              "windows": "${BASE}/sph-app-windows-${TAG_NAME}.zip",
+              "macos": "${BASE}/sph-app-macos-${TAG_NAME}.zip"
             },
             "sha256": {
               "windows": "${WIN_SHA}",
@@ -112,6 +127,34 @@ jobs:
           }
           EOF
           cp manifest.json release-assets/
+
+      - name: Upload to Qiniu Kodo
+        if: env.QINIU_ACCESS_KEY != '' && env.QINIU_SECRET_KEY != '' && env.QINIU_BUCKET != '' && env.QINIU_BUCKET_DOMAIN != ''
+        run: |
+          set -e
+          TAG_NAME=${{ github.ref_name }}
+          echo "Installing qshell..."
+          QS_VERSION="v2.14.0"
+          curl -L -o qshell.tgz https://github.com/qiniu/qshell/releases/download/${QS_VERSION}/qshell-${QS_VERSION}-linux-amd64.tar.gz
+          tar -xzf qshell.tgz
+          mv qshell-*/qshell ./qshell
+          chmod +x ./qshell
+          
+          echo "Configuring qshell account..."
+          ./qshell account "$QINIU_ACCESS_KEY" "$QINIU_SECRET_KEY" gha
+          
+          echo "Uploading assets to Qiniu bucket: $QINIU_BUCKET"
+          FILE_WIN="release-assets/sph-app-windows-${TAG_NAME}.zip"
+          FILE_MAC="release-assets/sph-app-macos-${TAG_NAME}.zip"
+          FILE_MAN="release-assets/manifest.json"
+          
+          if [ ! -f "$FILE_WIN" ]; then echo "Missing $FILE_WIN"; exit 1; fi
+          if [ ! -f "$FILE_MAC" ]; then echo "Missing $FILE_MAC"; exit 1; fi
+          if [ ! -f "$FILE_MAN" ]; then echo "Missing $FILE_MAN"; exit 1; fi
+          
+          ./qshell fput "$QINIU_BUCKET" "releases/sph-app-windows-${TAG_NAME}.zip" "$FILE_WIN" --overwrite
+          ./qshell fput "$QINIU_BUCKET" "releases/sph-app-macos-${TAG_NAME}.zip" "$FILE_MAC" --overwrite
+          ./qshell fput "$QINIU_BUCKET" "releases/manifest.json" "$FILE_MAN" --overwrite
 
       - name: Show release assets
         run: |

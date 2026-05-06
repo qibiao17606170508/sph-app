@@ -1,9 +1,13 @@
 """视频号批量上传工具 - 桌面版入口"""
 import os
+import shutil
 import sys
 import time
 import threading
+import urllib.error
+import urllib.request
 import webbrowser
+import subprocess
 
 # 确保在可写数据目录运行
 _BASE = os.environ.get('APP_BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +22,9 @@ def configure_webview():
     """配置 WebView2 环境以确保稳定性和 DLL 解析。
     使用 setdefault，允许 run.py 或外层脚本预先设置。
     """
+    if sys.platform == 'win32':
+        # Windows 下强制使用 Edge Chromium，避免退回到过时的 MSHTML/IE 内核。
+        os.environ.setdefault('PYWEBVIEW_GUI', 'edgechromium')
     os.environ.setdefault(
         'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS',
         '--disable-gpu-rasterization --disable-software-rasterizer'
@@ -48,6 +55,152 @@ def get_icon_path():
         if path and os.path.isfile(path):
             return path
     return None
+
+
+def has_webview2_runtime():
+    """检测 Windows 是否已安装 Edge WebView2 Runtime。"""
+    if sys.platform != 'win32':
+        return True
+    try:
+        import winreg
+    except Exception:
+        return False
+
+    client_guid = r'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    uninstall_keys = (
+        r'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft EdgeWebView',
+        r'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft EdgeWebView',
+    )
+
+    def _has_version(root, subkey):
+        try:
+            with winreg.OpenKey(root, subkey) as key:
+                value, _ = winreg.QueryValueEx(key, 'pv')
+                return bool(str(value or '').strip())
+        except Exception:
+            return False
+
+    def _has_display_version(root, subkey):
+        try:
+            with winreg.OpenKey(root, subkey) as key:
+                value, _ = winreg.QueryValueEx(key, 'DisplayVersion')
+                return bool(str(value or '').strip())
+        except Exception:
+            return False
+
+    roots = []
+    for name in ('HKEY_CURRENT_USER', 'HKEY_LOCAL_MACHINE'):
+        root = getattr(winreg, name, None)
+        if root is not None:
+            roots.append(root)
+
+    for root in roots:
+        if _has_version(root, client_guid):
+            return True
+        for subkey in uninstall_keys:
+            if _has_display_version(root, subkey):
+                return True
+    return False
+
+
+def notify_missing_webview2():
+    message = (
+        '检测到当前 Windows 正在使用旧版 MSHTML 内核，界面和登录功能会异常。\n'
+        '请先安装 Microsoft Edge WebView2 Runtime 后再打开软件。\n'
+        '安装完成后重新启动即可。'
+    )
+    print(f'[错误] {message}')
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, message, '缺少 WebView2 Runtime', 0x10)
+    except Exception:
+        pass
+    try:
+        webbrowser.open('https://developer.microsoft.com/microsoft-edge/webview2/')
+    except Exception:
+        pass
+
+
+def find_chrome_executable():
+    custom = os.environ.get('CHROME_PATH', '').strip()
+    candidates = [custom] if custom else []
+
+    if sys.platform == 'win32':
+        for env_name in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'):
+            root = os.environ.get(env_name, '').strip()
+            if root:
+                candidates.append(os.path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+    elif sys.platform == 'darwin':
+        candidates += [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            os.path.expanduser('~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+        ]
+    else:
+        which_path = shutil.which('google-chrome') or shutil.which('chrome') or shutil.which('chromium')
+        if which_path:
+            candidates.append(which_path)
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return ''
+
+
+def notify_missing_chrome():
+    message = (
+        '未检测到谷歌浏览器。\n'
+        '请先安装 Google Chrome 后再打开软件。'
+    )
+    print(f'[错误] {message}')
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, message, '缺少谷歌浏览器', 0x10)
+    except Exception:
+        pass
+    try:
+        webbrowser.open('https://www.google.com/chrome/')
+    except Exception:
+        pass
+
+
+def open_chrome_app():
+    """Windows 下优先直接使用谷歌浏览器应用窗口模式打开。"""
+    chrome_path = find_chrome_executable()
+    if not chrome_path:
+        notify_missing_chrome()
+        return False
+
+    profile_dir = os.path.join(_BASE, 'chrome-shell-profile')
+    os.makedirs(profile_dir, exist_ok=True)
+    app_url = f'http://127.0.0.1:{PORT}'
+    cmd = [
+        chrome_path,
+        f'--app={app_url}',
+        '--new-window',
+        '--no-first-run',
+        '--disable-session-crashed-bubble',
+        '--disable-features=TranslateUI',
+        f'--user-data-dir={profile_dir}',
+        '--window-size=1200,800',
+    ]
+    print(f'[启动] 使用谷歌浏览器打开: {chrome_path}')
+    try:
+        proc = subprocess.Popen(cmd)
+    except Exception as e:
+        print(f'[错误] 启动谷歌浏览器失败: {e}')
+        notify_missing_chrome()
+        return False
+
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    return True
 
 
 from server import app, socketio, PORT
@@ -131,8 +284,41 @@ def start_server():
     return t
 
 
+def wait_for_server_http(timeout=15):
+    """等待本地 HTTP 服务真正开始响应，避免 WebView 提前打开出现空白页。"""
+    deadline = time.time() + timeout
+    last_error = ''
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{PORT}/api/version', timeout=2) as resp:
+                if 200 <= resp.getcode() < 500:
+                    return True
+        except urllib.error.HTTPError as e:
+            if 200 <= e.code < 500:
+                return True
+            last_error = str(e)
+        except Exception as e:
+            last_error = str(e)
+        time.sleep(0.25)
+    print(f'[错误] 服务未就绪: {last_error}')
+    return False
+
+
 def open_desktop():
     """尝试用 pywebview 打开桌面窗口，失败则回退到浏览器"""
+    if sys.platform == 'win32':
+        try:
+            if not _server_ready.wait(timeout=10):
+                print('[错误] 服务启动超时')
+                return False
+            if not wait_for_server_http(timeout=15):
+                print('[错误] 服务页面加载超时')
+                return False
+        except Exception as e:
+            print(f'[错误] 等待服务时出错: {e}')
+            return False
+        return open_chrome_app()
+
     configure_webview()
     try:
         import webview
@@ -142,6 +328,9 @@ def open_desktop():
     try:
         if not _server_ready.wait(timeout=10):
             print('[错误] 服务启动超时')
+            return False
+        if not wait_for_server_http(timeout=15):
+            print('[错误] 服务页面加载超时')
             return False
     except Exception as e:
         print(f'[错误] 等待服务时出错: {e}')
@@ -217,6 +406,7 @@ def main():
 
     server_thread = start_server()
     _server_ready.wait(timeout=10)
+    wait_for_server_http(timeout=15)
 
     # 尝试 pywebview 桌面窗口
     desktop_started = open_desktop()

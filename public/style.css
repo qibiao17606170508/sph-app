@@ -613,7 +613,7 @@ body::after {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -1386,6 +1386,33 @@ select.input {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.dashboard-table-wrap {
+  height: 420px;
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.results-table-wrap {
+  height: 520px;
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.dashboard-table-wrap table,
+.results-table-wrap table {
+  min-width: 100%;
+}
+
+.dashboard-table-wrap thead th,
+.results-table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 table {
@@ -2267,6 +2294,11 @@ body[data-theme='dark'] .table-wrap {
   background: rgba(20, 22, 48, 0.28);
 }
 
+body[data-theme='dark'] .dashboard-table-wrap thead th,
+body[data-theme='dark'] .results-table-wrap thead th {
+  background: rgba(20, 22, 48, 0.96);
+}
+
 body[data-theme='dark'] .log-viewer {
   color: #cbc5eb;
 }
@@ -2417,6 +2449,11 @@ body[data-theme='dark'] .acct-add {
   .field-row-4,
   .accounts-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-table-wrap,
+  .results-table-wrap {
+    height: 360px;
   }
 
   .card-header {

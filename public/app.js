@@ -590,13 +590,11 @@ async function loadDashboard() {
     const published = results.filter((r) => (r.status || "").toLowerCase() === "published").length;
     const failed = results.filter((r) => (r.status || "").toLowerCase() === "failed").length;
     const rate = total > 0 ? Math.round((published / total) * 100) : 0;
-    const active = primary && primary.status === "ready" ? 1 : 0;
 
     $("statTotal").textContent = total;
     $("statRate").textContent = rate + "%";
     $("statRate").className = "stat-value" + (rate >= 80 ? " accent" : rate >= 50 ? "" : "");
     $("statFailed").textContent = failed;
-    $("statAccounts").textContent = active;
 
     // Recent activity table
     const recent = [...results].reverse().slice(0, 10);
@@ -1606,6 +1604,16 @@ $("logToggle").addEventListener("click", function () {
   const KEY = "theme";
   const darkMQL = window.matchMedia("(prefers-color-scheme: dark)");
 
+  function bindThemeChange(handler) {
+    if (darkMQL && typeof darkMQL.addEventListener === "function") {
+      darkMQL.addEventListener("change", handler);
+      return;
+    }
+    if (darkMQL && typeof darkMQL.addListener === "function") {
+      darkMQL.addListener(handler);
+    }
+  }
+
   function applyDark() {
     document.body.setAttribute("data-theme", "dark");
     $("themeToggle").textContent = "☀️";
@@ -1632,7 +1640,7 @@ $("logToggle").addEventListener("click", function () {
   applyTheme();
 
   // 系统主题变化时自动跟随（仅当用户未显式选择时）
-  darkMQL.addEventListener("change", () => {
+  bindThemeChange(() => {
     const saved = localStorage.getItem(KEY);
     if (saved !== "dark" && saved !== "light") applyTheme();
   });
@@ -1667,6 +1675,7 @@ document.addEventListener("visibilitychange", () => {
    INIT
    ═══════════════════════════════════════════════ */
 (async function initApp() {
+  showAuthShell();
   loadRememberedLogin();
   runWindowOpenChecks({ force: true })
     .then(() => {

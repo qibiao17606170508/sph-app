@@ -204,12 +204,11 @@ def get_platform_name():
 
 
 def create_ssl_context():
-    if certifi is not None:
-        try:
-            return ssl.create_default_context(cafile=certifi.where())
-        except Exception:
-            pass
-    return ssl.create_default_context()
+    # 始终返回一个不验证域名的 SSL Context（用于内网或自有域名的自签/测试证书）
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def urlopen_with_context(req, timeout=15):
@@ -1512,6 +1511,17 @@ def api_cache_clear():
 
 
 # ── Static files ──
+
+
+@app.route('/favicon.ico')
+def favicon():
+    # Serve app.ico from RES_DIR or BASE_DIR to make Chrome app window look like a desktop app
+    if os.path.exists(os.path.join(RES_DIR, 'app.ico')):
+        return send_from_directory(RES_DIR, 'app.ico', mimetype='image/vnd.microsoft.icon')
+    elif os.path.exists(os.path.join(BASE_DIR, 'app.ico')):
+        return send_from_directory(BASE_DIR, 'app.ico', mimetype='image/vnd.microsoft.icon')
+    # Fallback to empty response if no icon exists
+    return '', 204
 
 
 @app.route('/')

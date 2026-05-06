@@ -25,7 +25,7 @@
         <div class="update-error" id="updateError"></div>
       </div>
     </div>
-    <div class="auth-shell" id="authShell" style="display: none">
+    <div class="auth-shell" id="authShell" style="display: flex">
       <div class="auth-card">
         <div class="auth-brand">
           <div class="auth-brand-icon">
@@ -161,10 +161,6 @@
               <div class="stat-value" id="statFailed">&mdash;</div>
               <div class="stat-label">失败数</div>
             </div>
-            <div class="stat-card">
-              <div class="stat-value" id="statAccounts">&mdash;</div>
-              <div class="stat-label">登录账号</div>
-            </div>
           </div>
 
           <div class="card">
@@ -178,7 +174,7 @@
                 刷新
               </button>
             </div>
-            <div class="table-wrap" id="dashTable"></div>
+            <div class="table-wrap dashboard-table-wrap" id="dashTable"></div>
           </div>
         </section>
 
@@ -248,7 +244,7 @@
               </div>
               <div class="field">
                 <label>视频号剧集 <span class="field-optional">选填</span></label>
-                <input type="text" id="formDrama" class="input" placeholder="如：恶媳护婆婆" />
+                <input type="text" id="formDrama" class="input" placeholder="如：协议生四胎" />
               </div>
               <div class="field">
                 <label>间隔(分钟) <span class="field-optional">选填</span></label>
@@ -362,7 +358,7 @@
                 </button>
               </div>
             </div>
-            <div class="table-wrap">
+            <div class="table-wrap results-table-wrap">
               <table id="resultsTable">
                 <thead>
                   <tr>

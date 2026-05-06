@@ -462,6 +462,64 @@ def upload_headless_from_env():
     return True
 
 
+def _find_chromium_executable(headless=False):
+    """Find the best Chromium executable to use.
+    Priority:
+    1. System Google Chrome (most stable, users already have it for UI)
+    2. Bundled Playwright Chromium (fallback)
+    """
+    # 1. Check system Google Chrome
+    candidates = []
+    if sys.platform == 'win32':
+        for env_name in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'):
+            root = os.environ.get(env_name, '').strip()
+            if root:
+                candidates.append(os.path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+    elif sys.platform == 'darwin':
+        candidates += [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            os.path.expanduser('~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+        ]
+    else:
+        candidates.append(shutil_which('google-chrome'))
+        candidates.append(shutil_which('chrome'))
+        
+    for path in candidates:
+        if path and os.path.isfile(path):
+            logger.info(f"  [Browser] Found system Chrome: {path}")
+            return path
+            
+    # 2. Check bundled Playwright Chromium
+    pw_path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')
+    if pw_path and os.path.isdir(pw_path):
+        import glob
+        if headless and sys.platform == 'win32':
+            dirs = glob.glob(os.path.join(pw_path, 'chromium_headless_shell-*'))
+            if dirs:
+                dirs.sort()
+                exe = os.path.join(dirs[-1], 'chrome-headless-shell-win64', 'chrome-headless-shell.exe')
+                if os.path.isfile(exe):
+                    logger.info(f"  [Browser] Found bundled headless shell: {exe}")
+                    return exe
+                    
+        dirs = glob.glob(os.path.join(pw_path, 'chromium-*'))
+        if dirs:
+            dirs.sort()
+            latest = dirs[-1]
+            if sys.platform == 'win32':
+                exe = os.path.join(latest, 'chrome-win', 'chrome.exe')
+            elif sys.platform == 'darwin':
+                exe = os.path.join(latest, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+            else:
+                exe = os.path.join(latest, 'chrome-linux', 'chrome')
+                
+            if os.path.isfile(exe):
+                logger.info(f"  [Browser] Found bundled Chromium: {exe}")
+                return exe
+                
+    return None
+
+
 # ── Browser helpers ──
 async def init_browser(profile_dir, headless=True):
     """Launch a persistent Chromium browser context with the given profile."""
@@ -498,9 +556,14 @@ async def init_browser(profile_dir, headless=True):
         'locale': 'zh-CN',
         'ignore_default_args': ['--enable-automation'],
     }
-    # 本地 macOS 开发时优先使用系统 Chrome，避免 Playwright 自带 Chromium 在本机直接崩溃
-    if sys.platform == 'darwin' and not getattr(sys, 'frozen', False):
-        launch_kwargs['channel'] = 'chrome'
+    
+    exe_path = _find_chromium_executable(headless)
+    if exe_path:
+        launch_kwargs['executable_path'] = exe_path
+    else:
+        # 本地 macOS 开发时优先使用系统 Chrome，避免 Playwright 自带 Chromium 在本机直接崩溃
+        if sys.platform == 'darwin' and not getattr(sys, 'frozen', False):
+            launch_kwargs['channel'] = 'chrome'
 
     context = await p.chromium.launch_persistent_context(**launch_kwargs)
     return context
@@ -1548,7 +1611,7 @@ async def select_short_drama(page, drama_name):
     """
     发表页里绑定「视频号剧集」短剧链接（可选步骤）。
 
-    - CSV / 前端字段名：short_drama_name；页面上对应输入框「如：恶媳护婆婆」(#formDrama)。
+    - CSV / 前端字段名：short_drama_name；页面上对应输入框「如：协议生四胎」(#formDrama)。
     - 自动化步骤：点「选择链接」→ 选「视频号剧集」→ 在「搜索内容」里填入剧集名并回车
       → 尝试点击表格首行选中剧集。
     """
