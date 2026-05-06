@@ -105,7 +105,7 @@ jobs:
           $QSHELL_CMD user cu gha
           
           # 找到打包好的 zip 文件
-          ZIP_FILE=$(find dist -name "*.zip" | head -n 1)
+          ZIP_FILE=$(find dist -maxdepth 1 -name "*.zip" | head -n 1)
           if [ -z "$ZIP_FILE" ]; then
             echo "Error: No zip file found in dist directory!"
             exit 1
