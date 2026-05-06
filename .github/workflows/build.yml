@@ -137,7 +137,6 @@ jobs:
           QS_VERSION="v2.14.0"
           curl -L -o qshell.tgz https://github.com/qiniu/qshell/releases/download/${QS_VERSION}/qshell-${QS_VERSION}-linux-amd64.tar.gz
           tar -xzf qshell.tgz
-          mv qshell-*/qshell ./qshell
           chmod +x ./qshell
           
           echo "Configuring qshell account..."
