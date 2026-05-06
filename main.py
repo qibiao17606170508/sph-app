@@ -304,8 +304,31 @@ def wait_for_server_http(timeout=15):
     return False
 
 
+def check_webview2():
+    """检查 Windows 系统是否安装了 WebView2 运行库"""
+    if sys.platform != 'win32':
+        return True
+    import winreg
+    try:
+        reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")
+        if winreg.QueryValueEx(reg_key, "pv")[0]:
+            return True
+    except Exception:
+        pass
+    try:
+        reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")
+        if winreg.QueryValueEx(reg_key, "pv")[0]:
+            return True
+    except Exception:
+        pass
+    return False
+
 def open_desktop():
     """尝试用 pywebview 打开桌面窗口，失败则回退到浏览器"""
+    if sys.platform == 'win32' and not check_webview2():
+        print('[提示] 未检测到 WebView2 运行库，降级使用 Chrome App 模式')
+        return open_chrome_app()
+
     configure_webview()
     try:
         import webview
