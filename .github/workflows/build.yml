@@ -149,8 +149,8 @@ jobs:
           cat release-assets/build_info_*.txt > combined_info.txt
           
           VERSION=$(grep "version=" combined_info.txt | head -n 1 | cut -d'=' -f2)
-          WIN_SHA=$(grep "windows_sha256=" combined_info.txt | cut -d'=' -f2)
-          MAC_SHA=$(grep "macos_sha256=" combined_info.txt | cut -d'=' -f2)
+          WIN_SHA=$(grep "^windows_sha256=" combined_info.txt | head -n 1 | cut -d'=' -f2 | tr -d '\r\n')
+          MAC_SHA=$(grep "^macos_sha256=" combined_info.txt | head -n 1 | cut -d'=' -f2 | tr -d '\r\n')
           TAG_NAME=${GITHUB_REF#refs/tags/}
           
           DOMAIN="${QINIU_BUCKET_DOMAIN}"

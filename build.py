@@ -6,11 +6,14 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.request
 
 
 
 APP_NAME = 'sph-app'
 DISPLAY_NAME = '视频号批量上传'
+WEBVIEW2_BOOTSTRAPPER_FILENAME = 'MicrosoftEdgeWebview2Setup.exe'
+WEBVIEW2_BOOTSTRAPPER_URL = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
 
 
 def configure_console_output():
@@ -135,10 +138,83 @@ def get_hidden_imports(platform_name):
         '--hidden-import', 'webview',
     ]
     if platform_name == 'windows':
-        hidden += ['--hidden-import', 'webview.platforms.winforms']
+        hidden += [
+            '--hidden-import', 'webview.platforms.winforms',
+            '--hidden-import', 'webview.platforms.edgechromium',
+            '--hidden-import', 'clr',
+            '--hidden-import', 'pythonnet',
+            '--hidden-import', 'clr_loader',
+        ]
     elif platform_name == 'macos':
-        hidden += ['--hidden-import', 'webview.platforms.cocoa']
+        hidden += [
+            '--hidden-import', 'webview.platforms.cocoa',
+            '--hidden-import', 'objc',
+            '--hidden-import', 'AppKit',
+            '--hidden-import', 'Cocoa',
+            '--hidden-import', 'Foundation',
+            '--hidden-import', 'WebKit',
+        ]
     return hidden
+
+
+def get_platform_pyinstaller_args(platform_name):
+    args = []
+    if platform_name == 'windows':
+        args += [
+            '--collect-submodules', 'pythonnet',
+            '--collect-submodules', 'clr_loader',
+            '--copy-metadata', 'pythonnet',
+        ]
+    return args
+
+
+def get_build_cache_dir(base):
+    return os.path.join(base, '.build-cache')
+
+
+def find_local_webview2_bootstrapper(base):
+    candidates = [
+        os.path.join(base, WEBVIEW2_BOOTSTRAPPER_FILENAME),
+        os.path.join(get_build_cache_dir(base), WEBVIEW2_BOOTSTRAPPER_FILENAME),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ''
+
+
+def download_webview2_bootstrapper(base):
+    cache_dir = get_build_cache_dir(base)
+    os.makedirs(cache_dir, exist_ok=True)
+    target_path = os.path.join(cache_dir, WEBVIEW2_BOOTSTRAPPER_FILENAME)
+    log(f'[INFO] Downloading WebView2 bootstrapper: {WEBVIEW2_BOOTSTRAPPER_URL}')
+    req = urllib.request.Request(
+        WEBVIEW2_BOOTSTRAPPER_URL,
+        headers={'User-Agent': 'Mozilla/5.0 sph-app build bootstrapper'}
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = resp.read()
+    with open(target_path, 'wb') as f:
+        f.write(data)
+    log(f'[INFO] Cached WebView2 bootstrapper: {target_path}')
+    return target_path
+
+
+def ensure_webview2_bootstrapper(base, platform_name):
+    if platform_name != 'windows':
+        return ''
+    existing = find_local_webview2_bootstrapper(base)
+    if existing:
+        log(f'[INFO] Using existing WebView2 bootstrapper: {existing}')
+        return existing
+    try:
+        return download_webview2_bootstrapper(base)
+    except Exception as e:
+        raise SystemExit(
+            '[ERROR] 无法准备 Windows WebView2 安装器，发布包将无法离线自动补齐桌面运行库。\n'
+            f'[DETAIL] {e}\n'
+            f'[HINT] 手动将 {WEBVIEW2_BOOTSTRAPPER_FILENAME} 放到项目根目录后重新执行 python build.py'
+        )
 
 
 def build_pyinstaller_cmd(base, platform_name):
@@ -161,11 +237,51 @@ def build_pyinstaller_cmd(base, platform_name):
         '--noconfirm',
     ]
     cmd += get_hidden_imports(platform_name)
+    cmd += get_platform_pyinstaller_args(platform_name)
     cmd += get_icon_args(base, platform_name)
     if platform_name == 'macos':
         cmd += ['--osx-bundle-identifier', 'com.qibiao.wechat-channels-uploader']
     cmd += ['run.py']
     return cmd
+
+
+def ensure_windows_desktop_runtime():
+    if sys.platform != 'win32':
+        return
+    missing = []
+    required_modules = (
+        ('webview', 'pywebview'),
+        ('clr', 'pythonnet'),
+        ('clr_loader', 'clr_loader'),
+    )
+    for import_name, package_name in required_modules:
+        try:
+            __import__(import_name)
+        except Exception:
+            missing.append(package_name)
+    if missing:
+        raise SystemExit(
+            '[ERROR] Windows 原生桌面依赖缺失，当前构建出的应用将无法启动桌面窗口。\n'
+            f'[MISSING] {", ".join(missing)}\n'
+            '[HINT] 先执行: python -m pip install -r requirements.txt'
+        )
+
+
+def ensure_macos_desktop_runtime():
+    if sys.platform != 'darwin':
+        return
+    missing = []
+    for module_name in ('webview', 'objc', 'AppKit', 'Foundation', 'WebKit'):
+        try:
+            __import__(module_name)
+        except Exception:
+            missing.append(module_name)
+    if missing:
+        raise SystemExit(
+            '[ERROR] macOS 原生桌面依赖缺失，当前构建出的 .app 将无法启动原生窗口。\n'
+            f'[MISSING] {", ".join(missing)}\n'
+            '[HINT] 先执行: python3 -m pip install -r requirements.txt'
+        )
 
 
 def copy_playwright_browsers(base, platform_name, chromium_ver):
@@ -213,6 +329,15 @@ def get_dist_target(base, platform_name):
     if platform_name == 'windows':
         return os.path.join(base, 'dist', DISPLAY_NAME)
     return os.path.join(base, 'dist', f'{DISPLAY_NAME}.app')
+
+
+def bundle_webview2_bootstrapper(base, platform_name, target_path):
+    if platform_name != 'windows':
+        return
+    bootstrapper_path = ensure_webview2_bootstrapper(base, platform_name)
+    destination = os.path.join(target_path, WEBVIEW2_BOOTSTRAPPER_FILENAME)
+    shutil.copy2(bootstrapper_path, destination)
+    log(f'[INFO] Bundled WebView2 bootstrapper: {destination}')
 
 
 def make_release_archive(base, platform_name, version, target_path):
@@ -310,12 +435,15 @@ def build():
     log(f'[INFO] Building version: {version}')
     log(f'[INFO] Platform: {platform_name}')
 
+    ensure_windows_desktop_runtime()
+    ensure_macos_desktop_runtime()
+
     chromium_ver = find_chromium_version()
     if chromium_ver:
         log(f'[INFO] Chromium revision: {chromium_ver}')
 
     try:
-        import PyInstaller  # noqa: F401
+        __import__('PyInstaller')
     except ModuleNotFoundError:
         raise SystemExit(
             '[ERROR] Missing dependency: PyInstaller\n'
@@ -340,6 +468,8 @@ def build():
     target = get_dist_target(base, platform_name)
     if not os.path.exists(target):
         raise SystemExit(f'[ERROR] Build output not found: {target}')
+
+    bundle_webview2_bootstrapper(base, platform_name, target)
 
     archive_path = make_release_archive(base, platform_name, version, target)
     total = get_target_size(target)

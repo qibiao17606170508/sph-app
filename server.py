@@ -858,6 +858,44 @@ async def _login_async(name, acct):
 # ── Verify login status ──
 
 
+async def _check_account_login_state(page):
+    """验证账号登录态时，优先探测视频号后台页，避免根地址未完成跳转造成误判。"""
+    probe_urls = [
+        'https://channels.weixin.qq.com/platform',
+        'https://channels.weixin.qq.com/platform/post/create',
+    ]
+    last_state = {'logged_in': False, 'reason': 'fallback', 'detail': page.url or ''}
+
+    for probe_url in probe_urls:
+        try:
+            await page.goto(probe_url, wait_until='domcontentloaded', timeout=20000)
+        except Exception as e:
+            logger.warn(f'verify: goto {probe_url} failed: {e}')
+            continue
+
+        for attempt in range(3):
+            await page.wait_for_timeout(1500 if attempt == 0 else 1000)
+            last_state = await detect_login_state(page)
+            if last_state.get('logged_in'):
+                logger.info(
+                    f'verify: logged in via {probe_url} '
+                    f'({last_state.get("reason")} / {last_state.get("detail")})'
+                )
+                return last_state
+            if last_state.get('reason') in ('login_url', 'login_text'):
+                logger.info(
+                    f'verify: logged out via {probe_url} '
+                    f'({last_state.get("reason")} / {last_state.get("detail")})'
+                )
+                return last_state
+
+    logger.info(
+        'verify: final login probe result '
+        f'({last_state.get("reason")} / {last_state.get("detail")})'
+    )
+    return last_state
+
+
 @app.route('/api/accounts/<name>/verify', methods=['POST'])
 def api_verify(name):
     try:
@@ -935,19 +973,18 @@ async def _verify_hot_path(name):
         }
     out = {'name': name, 'valid': False}
     try:
-        await page.goto(
-            'https://channels.weixin.qq.com',
-            wait_until='domcontentloaded',
-            timeout=20000,
-        )
-        await page.wait_for_timeout(1500)
-        login_state = await detect_login_state(page)
+        login_state = await _check_account_login_state(page)
         expired = not login_state.get('logged_in', False)
         if expired:
             updateAccountStatus(name, 'needs-login')
         else:
             updateAccountStatus(name, 'ready')
-        out = {'name': name, 'valid': not expired}
+        out = {
+            'name': name,
+            'valid': not expired,
+            'reason': login_state.get('reason', ''),
+            'detail': login_state.get('detail', ''),
+        }
     except Exception as e:
         logger.error(f'verify: goto/check failed: {e}')
         out = {
@@ -1016,17 +1053,19 @@ async def _verify_async(name, acct):
             }
     try:
         page = ctx.pages[0] if len(ctx.pages) > 0 else await ctx.new_page()
-        await page.goto('https://channels.weixin.qq.com',
-                        wait_until='commit', timeout=8000)
-        await page.wait_for_timeout(1500)
-        login_state = await detect_login_state(page)
+        login_state = await _check_account_login_state(page)
         expired = not login_state.get('logged_in', False)
         if expired:
             updateAccountStatus(name, 'needs-login')
         else:
             updateAccountStatus(name, 'ready')
 
-        return {'name': name, 'valid': not expired}
+        return {
+            'name': name,
+            'valid': not expired,
+            'reason': login_state.get('reason', ''),
+            'detail': login_state.get('detail', ''),
+        }
     finally:
         try:
             await ctx.close()
@@ -1509,6 +1548,34 @@ def api_upload_file():
             'name': original_name,
             'size': os.path.getsize(dest),
         })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/upload/file', methods=['DELETE'])
+def api_delete_upload_file():
+    try:
+        data = request.get_json(silent=True) or {}
+        target_path = str(data.get('path') or '').strip()
+        if not target_path:
+            return jsonify({'error': '缺少文件路径'}), 400
+
+        uploads_root = os.path.realpath(UPLOADS_DIR)
+        real_target = os.path.realpath(target_path)
+        try:
+            common = os.path.commonpath([uploads_root, real_target])
+        except ValueError:
+            common = ''
+        if common != uploads_root:
+            return jsonify({'error': '仅允许删除 uploads 目录内的素材文件'}), 403
+
+        if not os.path.exists(real_target):
+            return jsonify({'message': '文件已不存在', 'deleted': False}), 200
+        if not os.path.isfile(real_target):
+            return jsonify({'error': '目标不是文件'}), 400
+
+        os.remove(real_target)
+        return jsonify({'message': '素材已删除', 'deleted': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

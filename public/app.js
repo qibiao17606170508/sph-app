@@ -938,7 +938,7 @@ function setupDropZone(type) {
   input.addEventListener("change", () => {
     const files = input.files;
     if (!files || files.length === 0) return;
-    if (type === "video" && files.length > 1) {
+    if (type === "video") {
       handleBatchVideos(files);
     } else {
       handleFile(type, files[0]);
@@ -967,7 +967,7 @@ function setupDropZone(type) {
         return;
       }
     }
-    if (type === "video" && files.length > 1) {
+    if (type === "video") {
       handleBatchVideos(files);
     } else {
       handleFile(type, files[0]);
@@ -983,6 +983,7 @@ async function handleFile(type, file) {
     });
     batchVideoFiles = [];
     $("batchVideoStrip").style.display = "none";
+    $("batchVideoStrip").innerHTML = "";
     $("addEntryBtn").innerHTML = addEntryBtnDefault;
   }
   const preview = $(`${type}Preview`);
@@ -1012,6 +1013,15 @@ async function handleFile(type, file) {
     const data = await res.json();
     preview.dataset.path = data.path;
     preview.dataset.name = data.name;
+
+    // 删除仅做前端本地移除，不调用后端接口
+    const delBtn = preview.querySelector(".delete-btn");
+    if (delBtn) {
+      delBtn.onclick = async (e) => {
+        e.stopPropagation();
+        await removePendingFile(type);
+      };
+    }
   } catch (err) {
     toast("文件上传失败: " + (err.message || "网络错误"), "error");
     return;
@@ -1040,30 +1050,79 @@ async function handleBatchVideos(files) {
   const hintEl = $("videoDrop").querySelector(".drop-hint");
   hintEl.textContent = "上传中 0/" + list.length + "…";
 
+  migrateSingleVideoPreviewToBatch();
+
   const results = [];
   for (let i = 0; i < list.length; i++) {
-    results.push(await uploadVideo(list[i]));
+    const res = await uploadVideo(list[i]);
+    res._originalFile = list[i]; // 保存原始文件对象以便后续操作
+    results.push(res);
     hintEl.textContent = "上传中 " + (i + 1) + "/" + list.length + "…";
   }
 
-  // 暂存上传结果，填充横排预览条
-  batchVideoFiles = results;
+  // 追加到现有暂存结果，不覆盖之前已选择的视频
+  batchVideoFiles = batchVideoFiles.concat(results);
+  renderBatchStrip();
+  $("videoInput").value = "";
+
+  hintEl.textContent = batchVideoFiles.length + " 个视频已就绪";
+  toast(`已追加 ${results.length} 个视频，当前共 ${batchVideoFiles.length} 个`, "info");
+}
+
+function migrateSingleVideoPreviewToBatch() {
+  const preview = $("videoPreview");
+  if (!preview || preview.style.display === "none" || !preview.dataset.path) return;
+
+  const file = {
+    path: preview.dataset.path,
+    name: preview.dataset.name || cleanUploadName(preview.dataset.path),
+    _blobUrl: preview.dataset.blobUrl || preview.querySelector("video")?.src || "",
+  };
+  batchVideoFiles.push(file);
+
+  preview.style.display = "none";
+  preview.dataset.path = "";
+  preview.dataset.name = "";
+  delete preview.dataset.blobUrl;
+  const video = preview.querySelector("video");
+  if (video) video.removeAttribute("src");
+}
+
+function renderBatchStrip() {
   const strip = $("batchVideoStrip");
-  strip.innerHTML = list
+  if (batchVideoFiles.length === 0) {
+    strip.style.display = "none";
+    strip.innerHTML = "";
+    $("addEntryBtn").innerHTML = addEntryBtnDefault;
+    $("videoDrop").querySelector(".drop-icon").style.display = "";
+    $("videoDrop").querySelector(".drop-text").style.display = "";
+    $("videoDrop").querySelector(".drop-hint").textContent = "MP4 · 可批量选择 · 最大 20GB";
+    return;
+  }
+
+  strip.innerHTML = batchVideoFiles
     .map((file, i) => {
-      const blobUrl = URL.createObjectURL(file);
-      results[i]._blobUrl = blobUrl; // 暂存以便后续清理
+      // 如果没有 blobUrl 则创建一个 (用于初次渲染或删除后重绘)
+      if (!file._blobUrl && file._originalFile) {
+        file._blobUrl = URL.createObjectURL(file._originalFile);
+      }
       return `<div class="batch-video-card" data-index="${i}">
-      <video src="${blobUrl}" muted preload="metadata" title="${esc(results[i].name)}"></video>
-      <div class="batch-video-name">${esc(results[i].name)}</div>
+      <button class="batch-video-delete" title="删除" type="button">&times;</button>
+      <video src="${file._blobUrl}" muted preload="metadata" title="${esc(file.name)}"></video>
+      <div class="batch-video-name">${esc(file.name)}</div>
     </div>`;
     })
     .join("");
   strip.style.display = "flex";
   $("videoPreview").style.display = "none";
+  $("videoDrop").querySelector(".drop-icon").style.display = "none";
+  $("videoDrop").querySelector(".drop-text").style.display = "none";
+
   // 点击卡片预览
   strip.querySelectorAll(".batch-video-card").forEach((card) => {
-    card.addEventListener("click", () => {
+    const idx = parseInt(card.dataset.index);
+    card.addEventListener("click", (e) => {
+      if (e.target.classList.contains("batch-video-delete")) return;
       const vid = card.querySelector("video");
       if (vid.paused) {
         vid.play();
@@ -1071,12 +1130,63 @@ async function handleBatchVideos(files) {
         vid.pause();
       }
     });
-  });
-  // 更新按钮文案
-  $("addEntryBtn").innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加 ${results.length} 个到队列`;
 
-  hintEl.textContent = results.length + " 个视频已就绪";
-  toast(`${results.length} 个视频已就绪，请填写信息后点击"添加到队列"`, "info");
+    // 删除按钮
+    card.querySelector(".batch-video-delete").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await removePendingFile("batch", idx);
+    });
+  });
+
+  // 更新按钮文案
+  $("addEntryBtn").innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加 ${batchVideoFiles.length} 个到队列`;
+}
+
+async function removePendingFile(type, index) {
+  let targetPath = "";
+  if (type === "batch") {
+    const file = batchVideoFiles[index];
+    if (!file) return;
+    targetPath = file.path || "";
+    if (targetPath) {
+      try {
+        const res = await api("/api/upload/file", {
+          method: "DELETE",
+          body: JSON.stringify({ path: targetPath }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || "删除失败");
+        }
+      } catch (err) {
+        toast("删除失败: " + (err.message || "网络错误"), "error");
+        return;
+      }
+    }
+    if (file._blobUrl) URL.revokeObjectURL(file._blobUrl);
+    batchVideoFiles.splice(index, 1);
+    renderBatchStrip();
+  } else {
+    const preview = $(`${type}Preview`);
+    targetPath = preview?.dataset.path || "";
+    if (targetPath) {
+      try {
+        const res = await api("/api/upload/file", {
+          method: "DELETE",
+          body: JSON.stringify({ path: targetPath }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || "删除失败");
+        }
+      } catch (err) {
+        toast("删除失败: " + (err.message || "网络错误"), "error");
+        return;
+      }
+    }
+    clearDropZone(type);
+  }
+  toast("已删除素材", "success");
 }
 
 function clearDropZone(type) {
@@ -1095,6 +1205,10 @@ function clearDropZone(type) {
   zone.querySelector(".drop-icon").style.display = "";
   zone.querySelector(".drop-text").style.display = "";
   zone.querySelector(".drop-hint").textContent = defaultHints[type];
+  if (type === "video") {
+    $("batchVideoStrip").style.display = "none";
+    $("batchVideoStrip").innerHTML = "";
+  }
 }
 
 setupDropZone("video");

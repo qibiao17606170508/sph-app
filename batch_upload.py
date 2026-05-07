@@ -6,7 +6,6 @@ Translated from batch-upload.js
 """
 
 import asyncio
-import base64
 import csv
 import io
 import json
@@ -111,6 +110,22 @@ class _Logger:
 logger = _Logger()
 
 
+def _windows_hidden_subprocess_kwargs():
+    if sys.platform != 'win32':
+        return {}
+    kwargs = {}
+    create_no_window = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    if create_no_window:
+        kwargs['creationflags'] = create_no_window
+    startupinfo_cls = getattr(subprocess, 'STARTUPINFO', None)
+    startf_use_show_window = getattr(subprocess, 'STARTF_USESHOWWINDOW', 0)
+    if startupinfo_cls is not None:
+        startupinfo = startupinfo_cls()
+        startupinfo.dwFlags |= startf_use_show_window
+        kwargs['startupinfo'] = startupinfo
+    return kwargs
+
+
 # ── Desktop notification ──
 def notify_user(title, message):
     """跨平台桌面通知（best-effort）。
@@ -133,7 +148,7 @@ def notify_user(title, message):
             subprocess.run(
                 f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; '
                 f'[System.Windows.Forms.MessageBox]::Show(\'{s}\', \'{t}\')"',
-                shell=True, timeout=10
+                shell=True, timeout=10, **_windows_hidden_subprocess_kwargs()
             )
     except Exception:
         pass
@@ -475,13 +490,13 @@ async def detect_login_state(page):
 
 
 def upload_headless_from_env():
-    """批量上传是否用无头 Chromium（无感、不弹窗）。默认无头；HEADLESS_UPLOAD=0/false/no/off 才有界面。"""
+    """批量上传是否用无头 Chromium。默认有界面；仅 HEADLESS_UPLOAD=1/true/yes/on 才无头。"""
     raw = os.environ.get('HEADLESS_UPLOAD', '').strip().lower()
     if not raw:
-        return True
-    if raw in ('0', 'false', 'no', 'off'):
         return False
-    return True
+    if raw in ('1', 'true', 'yes', 'on'):
+        return True
+    return False
 
 
 def _find_chromium_executable(headless=False):
@@ -508,6 +523,14 @@ def _find_chromium_executable(headless=False):
         
     for path in candidates:
         if path and os.path.isfile(path):
+            # Windows 下检查是否有执行权限，避免 spawn EPERM
+            if sys.platform == 'win32':
+                try:
+                    # 尝试用 os.access 检查 X_OK
+                    if not os.access(path, os.X_OK):
+                        continue
+                except Exception:
+                    pass
             logger.info(f"  [Browser] Found system Chrome: {path}")
             return path
             
@@ -543,6 +566,38 @@ def _find_chromium_executable(headless=False):
 
 
 # ── Browser helpers ──
+def _bind_context_close_with_playwright(context, playwright_driver):
+    """确保关闭 BrowserContext 时，同时停止 async_playwright() 的底层连接。
+
+    Windows + Python 3.13 下，如果只 close context 而不 stop playwright，
+    很容易在事件循环退出时看到:
+    - Task was destroyed but it is pending
+    - unclosed transport / closed pipe
+    """
+    orig_close = context.close
+    if getattr(context, '_wx_close_wrapped', False):
+        return context
+
+    async def _close_and_stop(*args, **kwargs):
+        close_err = None
+        try:
+            return await orig_close(*args, **kwargs)
+        except Exception as e:
+            close_err = e
+        finally:
+            try:
+                await playwright_driver.stop()
+            except Exception:
+                pass
+        if close_err is not None:
+            raise close_err
+
+    context.close = _close_and_stop
+    context._wx_close_wrapped = True
+    context._wx_playwright_driver = playwright_driver
+    return context
+
+
 async def init_browser(profile_dir, headless=True):
     """Launch a persistent Chromium browser context with the given profile."""
     _pw_path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')
@@ -553,12 +608,21 @@ async def init_browser(profile_dir, headless=True):
         '--disable-infobars',
         '--disable-extensions',
     ]
-    if sys.platform != 'darwin':
+    
+    # 针对 Linux 和 Windows 的特定优化
+    if sys.platform == 'linux':
         args += [
             '--disable-gpu',
-            '--no-sandbox',
+            '--no-sandbox',  # Linux 环境下（尤其是 Docker/Root 运行）通常需要此参数
             '--disable-dev-shm-usage',
         ]
+    elif sys.platform == 'win32':
+        args += [
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+        ]
+        # 注意：移除了 Windows 和 macOS 下默认的 --no-sandbox
+        # 因为在常规桌面环境下不需要，且会触发“不受支持的命令行标记”的黄条警告
     
     # 强制清理可能导致崩溃的锁定目录
     try:
@@ -569,12 +633,17 @@ async def init_browser(profile_dir, headless=True):
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+    # 保持页面按真实窗口渲染（no_viewport=True）的同时，让有界面模式窗口最大化（不进全屏）
+    if not headless:
+        args += ['--start-maximized']
         
     launch_kwargs = {
         'user_data_dir': profile_dir,
         'headless': headless,
         'args': args,
-        'viewport': {'width': 1440, 'height': 900},
+        # 禁用 Playwright 视口模拟，按真实浏览器窗口宽度渲染页面
+        'no_viewport': True,
         'locale': 'zh-CN',
         'ignore_default_args': ['--enable-automation'],
     }
@@ -587,8 +656,50 @@ async def init_browser(profile_dir, headless=True):
         if sys.platform == 'darwin' and not getattr(sys, 'frozen', False):
             launch_kwargs['channel'] = 'chrome'
 
-    context = await p.chromium.launch_persistent_context(**launch_kwargs)
-    return context
+    try:
+        context = await p.chromium.launch_persistent_context(**launch_kwargs)
+        return _bind_context_close_with_playwright(context, p)
+    except Exception as e:
+        err_msg = str(e)
+        # 处理 ProcessSingleton 锁定问题 (Error code 32)
+        if 'ProcessSingleton' in err_msg or 'SingletonLock' in err_msg:
+            logger.warn(f"  [Browser] Launch failed due to ProcessSingleton lock. Retrying cleanup...")
+            await unlock_profile(profile_dir)
+            await asyncio.sleep(1)
+            try:
+                context = await p.chromium.launch_persistent_context(**launch_kwargs)
+                logger.info("  [Browser] Retry launch successful after secondary cleanup.")
+                return _bind_context_close_with_playwright(context, p)
+            except Exception as e_retry:
+                logger.error(f"  [Browser] Retry launch still failed: {e_retry}")
+                # 继续向下执行权限错误处理
+                err_msg = str(e_retry)
+                e = e_retry
+
+        if 'EPERM' in err_msg or 'Access is denied' in err_msg or 'permission denied' in err_msg:
+            logger.warn(f"  [Browser] Launch failed with permission error: {e}. Trying fallback...")
+            # 如果是因为系统 Chrome 权限问题，尝试清除 executable_path 让 Playwright 用自带的
+            if 'executable_path' in launch_kwargs:
+                launch_kwargs.pop('executable_path')
+                # 尝试用自带的 chromium channel
+                if sys.platform == 'darwin':
+                    launch_kwargs['channel'] = 'chromium'
+                try:
+                    context = await p.chromium.launch_persistent_context(**launch_kwargs)
+                    logger.info("  [Browser] Fallback launch successful.")
+                    return _bind_context_close_with_playwright(context, p)
+                except Exception as e2:
+                    logger.error(f"  [Browser] Fallback launch also failed: {e2}")
+                    try:
+                        await p.stop()
+                    except Exception:
+                        pass
+                    raise e2
+        try:
+            await p.stop()
+        except Exception:
+            pass
+        raise e
 
 
 async def unlock_profile(profile_dir):
@@ -596,6 +707,7 @@ async def unlock_profile(profile_dir):
     # 1. 尝试清理残留进程
     import subprocess
     dir_name = os.path.basename(profile_dir)
+    abs_profile_dir = os.path.abspath(profile_dir).lower()
     
     if sys.platform != 'win32':
         try:
@@ -612,21 +724,25 @@ async def unlock_profile(profile_dir):
                     cmdline = proc.info.get('cmdline')
                     if not cmdline:
                         continue
-                    # 检查命令行参数中是否包含 profile_dir 或 dir_name
+                    # 检查命令行参数中是否包含 profile_dir
                     cmd_str = ' '.join(cmdline).lower()
-                    if dir_name.lower() in cmd_str or profile_dir.lower() in cmd_str:
-                        if 'chrome' in proc.info['name'].lower() or 'chromium' in proc.info['name'].lower():
-                            logger.info(f"  [Cleanup] Killing residual browser process (PID: {proc.info['pid']})")
+                    if abs_profile_dir in cmd_str or dir_name.lower() in cmd_str:
+                        pname = (proc.info.get('name') or '').lower()
+                        if 'chrome' in pname or 'chromium' in pname or 'playwright' in pname:
+                            logger.info(f"  [Cleanup] Killing residual browser process (PID: {proc.info['pid']}, Name: {proc.info['name']})")
                             proc.kill()
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     pass
         except ImportError:
-            # 如果没装 psutil，退回到 wmic 暴力清理（不够精准但有效）
+            # 如果没装 psutil，退回到 wmic 暴力清理（针对常见浏览器名）
             try:
-                subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'], 
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(['taskkill', '/F', '/IM', 'chrome-headless-shell.exe', '/T'], 
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for img in ['chrome.exe', 'chromium.exe', 'chrome-headless-shell.exe']:
+                    subprocess.run(
+                        ['taskkill', '/F', '/IM', img, '/T'],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        **_windows_hidden_subprocess_kwargs(),
+                    )
             except Exception:
                 pass
 
@@ -637,20 +753,42 @@ async def unlock_profile(profile_dir):
     ]
     
     dirs_to_check = [profile_dir]
+    # 某些版本的 Chrome 会把锁文件放在 Default 目录下
     if os.path.exists(os.path.join(profile_dir, 'Default')):
         dirs_to_check.append(os.path.join(profile_dir, 'Default'))
         
     for d in dirs_to_check:
+        if not os.path.isdir(d):
+            continue
+        
+        # 尝试修复目录权限
+        if sys.platform == 'win32':
+            try:
+                import stat
+                os.chmod(d, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+            except Exception:
+                pass
+
         for fname in lock_files:
             fp = os.path.join(d, fname)
             if os.path.lexists(fp):
                 try:
+                    # Windows 下尝试解除只读并强行删除
+                    if sys.platform == 'win32':
+                        import stat
+                        try:
+                            os.chmod(fp, stat.S_IWRITE)
+                        except Exception:
+                            pass
+                    
                     if os.path.islink(fp):
                         os.unlink(fp)
                     else:
                         os.remove(fp)
+                    logger.info(f"  [Cleanup] Removed lock file: {fp}")
                 except OSError as e:
-                    logger.warn(f'Could not remove {fp}: {e}')
+                    # 如果还是报错，说明可能被系统其它进程占用，记录警告
+                    logger.warn(f'  [Cleanup] Could not remove {fp} (likely in use): {e}')
                     
     # 3. 清理 macOS 特有的缓存/锁定
     if sys.platform == 'darwin':
@@ -1120,61 +1258,6 @@ def publish_timer_allowed(record: dict, target: datetime, now: datetime | None =
     return True, 'ok'
 
 
-async def _try_fill_form_while_uploading(page, record, upload_started: bool, elapsed: float):
-    """上传进行途中顺带填：不显示位置、短剧、定时（与等进度同一协程内顺序 await，避免竞态）。"""
-    if record is None or not upload_started or elapsed < 3.0:
-        return
-    meta = getattr(page, '_wx_while_upload_fill', None)
-    if meta is None:
-        return
-    now = time.time()
-
-    if not meta.get('loc_ok') and (now - meta.get('loc_last', 0)) >= 2.0:
-        meta['loc_last'] = now
-        try:
-            await hide_location(page)
-        except Exception:
-            pass
-        meta['loc_ok'] = True
-
-    drama_name = (record.get('short_drama_name') or '').strip()
-    if drama_name and not meta.get('drama_ok') and (now - meta.get('drama_last', 0)) >= 5.0:
-        meta['drama_last'] = now
-        try:
-            await select_short_drama(page, drama_name)
-            meta['drama_ok'] = True
-        except Exception:
-            pass
-
-    publish_raw = (record.get('publish_time') or '').strip()
-    if publish_raw and meta.get('sched_ok') is None:
-        if (now - meta.get('sched_last', 0)) >= 6.0:
-            meta['sched_last'] = now
-            meta['sched_n'] = int(meta.get('sched_n', 0)) + 1
-            if meta['sched_n'] > 20:
-                meta['sched_ok'] = False
-            else:
-                try:
-                    pt_dt = datetime.fromisoformat(publish_raw)
-                except Exception:
-                    meta['sched_ok'] = False
-                    pt_dt = None
-                if pt_dt is not None:
-                    allowed, _why = publish_timer_allowed(record, pt_dt)
-                    if not allowed:
-                        meta['sched_ok'] = False
-                    elif pt_dt > datetime.now():
-                        try:
-                            ok = await set_schedule_publish(page, pt_dt)
-                            # 成功才标 True；失败保持 None 让下次轮询继续重试，
-                            # 直到重试满 20 次（约 20*6s=2min）才放弃，
-                            # 避免「上传中第一次没 render 出 dl 就永久放弃」。
-                            if ok:
-                                meta['sched_ok'] = True
-                        except Exception:
-                            pass
-
-
 async def wait_for_upload_with_progress(page, abort_signal, video_path=None, record=None):
     """Wait for video upload to complete by detecting page changes.
     先检测上传是否已启动（页面出现进度/文件名等变化），再等上传完成。
@@ -1192,21 +1275,12 @@ async def wait_for_upload_with_progress(page, abort_signal, video_path=None, rec
       且 >=UPLOAD_TAIL_IDLE_SEC 无新上行 → 视为尾部处理完成。
     - 进度/完成均扫描所有 frames（micro/content iframe）。
 
-    若传入 record，上传已启动约 3s 后会在等待循环内顺带填写：不显示位置、短剧、定时
-    （见 _try_fill_form_while_uploading），减少「干等大文件传完」的时间。
+    上传阶段只负责等待视频真正完成，不在过程中并行执行封面、位置、短剧、定时等操作，
+    避免与上传握手/转码阶段互相干扰。
     """
+    _ = record
     start_time = time.time()
     max_wait = _upload_wait_max_seconds(video_path)
-    if record is not None:
-        page._wx_while_upload_fill = {
-            'loc_ok': False,
-            'loc_last': 0.0,
-            'drama_ok': False,
-            'drama_last': 0.0,
-            'sched_ok': None,
-            'sched_last': 0.0,
-            'sched_n': 0,
-        }
     # 文件越大，最小上传时长越长 —— 给完成判定一个最低门槛，防止 0s 内"已完成"
     min_upload_sec = 15
     if video_path and os.path.isfile(video_path):
@@ -1286,6 +1360,7 @@ async def wait_for_upload_with_progress(page, abort_signal, video_path=None, rec
         pct = await _extract_upload_percent(page)
         now = time.time()
         if upload_started and pct is not None and stuck_same_sec > 0:
+            page._wx_last_pct = pct # 保存进度供后台填写判断
             if last_pct is None or pct != last_pct:
                 if last_pct is not None and pct != last_pct:
                     logger.info(f'  上传进度 {last_pct}% → {pct}%')
@@ -1400,8 +1475,6 @@ async def wait_for_upload_with_progress(page, abort_signal, video_path=None, rec
             tag = 'Uploading' if upload_started else 'Waiting'
             extra = f' 页面约 {pct}%' if (upload_started and pct is not None) else ''
             logger.info(f'  {tag} {int(elapsed)}s{extra} | {_format_diag(diag)}')
-
-        await _try_fill_form_while_uploading(page, record, upload_started, elapsed)
 
         await page.wait_for_timeout(2000)
 
@@ -1597,10 +1670,25 @@ async def _save_upload_debug(page, tag: str):
 async def _prime_upload_zone(page):
     """部分页面需先点上传区，file input 才会接受 set_input_files。"""
     try:
-        hint = page.get_by_text(re.compile(r'拖拽|点击上传|上传视频|选择视频'))
-        if await hint.count() > 0:
-            await hint.first.click(timeout=2500)
-            await page.wait_for_timeout(600)
+        # 尝试多个可能的点击目标，增加鲁棒性
+        hints = [
+            '拖拽', '点击上传', '上传视频', '选择视频',
+            'div.post-add-media', '.upload-area', '.media-status-body'
+        ]
+        for h in hints:
+            try:
+                if h.startswith('.') or ' ' in h or '>' in h:
+                    loc = page.locator(h).first
+                else:
+                    loc = page.get_by_text(re.compile(h)).first
+                
+                if await loc.count() > 0 and await loc.is_visible():
+                    await loc.click(timeout=2000)
+                    await page.wait_for_timeout(500)
+                    # 只要点中一个有效的就退出
+                    return
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -1712,8 +1800,33 @@ async def set_cover(page, cover_path):
         logger.warn(f'  Cover not found: {cover_path}')
         return
     try:
-        await page.get_by_text('编辑', exact=True).click(force=True)
-        await page.get_by_role('heading', name='编辑封面').wait_for(state='visible', timeout=5000)
+        cover_heading = page.get_by_role('heading', name='编辑封面')
+        if not await cover_heading.is_visible():
+            edit_candidates = [
+                page.locator('.edit-btn:visible').filter(has_text='编辑'),
+                page.get_by_text('编辑', exact=True),
+            ]
+            opened = False
+            for cand in edit_candidates:
+                try:
+                    count = await cand.count()
+                except Exception:
+                    count = 0
+                for idx in range(count):
+                    try:
+                        await cand.nth(idx).click(force=True, timeout=3000)
+                        await cover_heading.wait_for(state='visible', timeout=1500)
+                        opened = True
+                        break
+                    except Exception:
+                        try:
+                            await page.keyboard.press('Escape')
+                        except Exception:
+                            pass
+                if opened:
+                    break
+            if not opened:
+                raise RuntimeError('未找到可打开“编辑封面”的编辑按钮')
         await page.get_by_text('上传封面', exact=True).click()
         await page.locator('input[type=file]').nth(1).set_input_files(cover_path)
         await page.wait_for_timeout(2000)
@@ -2016,9 +2129,16 @@ def _picker_pub_date_dl(fr):
 
 def _picker_pub_time_dl(fr):
     """发表时间下的嵌套「请选择时间」时分 dl。"""
-    return fr.locator('dl.weui-desktop-picker__time').filter(
-        has=fr.locator('input[placeholder*="请选择时间"]')
+    # 关键：优先限定在当前「发表时间」date-time 组件内部，避免命中页面其它同名时间控件
+    dt_focus = fr.locator(
+        'dl.weui-desktop-picker__date.weui-desktop-picker__date-time.weui-desktop-picker__focus, '
+        'dl.weui-desktop-picker__date.weui-desktop-picker__date-time'
+    ).filter(has=fr.locator('input[placeholder*="发表时间"]')).first
+    nested = dt_focus.locator('dl.weui-desktop-picker__time').filter(
+        has=dt_focus.locator('input[placeholder*="请选择时间"]')
     ).first
+    # Playwright Locator 惰性求值，直接返回 nested；若不存在，调用处会 count()==0 再走兜底
+    return nested
 
 
 async def _picker_date_dd_is_open(w, fr=None) -> bool:
@@ -2312,19 +2432,54 @@ async def _picker_click_day_fr(fr, page, day: int) -> str:
 async def _picker_click_time_li_fr(fr, page, kind: str, val: int) -> str:
     """点选时分 ol 内 li：优先 Playwright，勿手改 selected class。"""
     want = str(int(val)).zfill(2)
-    tdl = _picker_pub_time_dl(fr)
-    if await tdl.count() == 0:
-        return await _picker_click_time_li_eval_fallback(fr, kind, val)
     sel = (
         'ol.weui-desktop-picker__time__hour, ol[class*="weui-desktop-picker__time__hour"], ol[class*="time__hour"]'
         if kind == 'hour'
         else 'ol.weui-desktop-picker__time__minute, ol[class*="weui-desktop-picker__time__minute"], ol[class*="time__minute"]'
     )
-    ol = tdl.locator(sel).first
-    if await ol.count() == 0:
-        return await _picker_click_time_li_eval_fallback(fr, kind, val)
+
+    # 1) 优先锁定当前 focus 的 date-time 组件里的时间列（你给的 DOM 就是这个结构）
+    focus_dt = fr.locator(
+        'dl.weui-desktop-picker__date.weui-desktop-picker__date-time.weui-desktop-picker__focus'
+    ).filter(has=fr.locator('input[placeholder*="发表时间"]'))
+    ol_candidates = focus_dt.locator(f'.weui-desktop-picker__panel-fd dl.weui-desktop-picker__time {sel}')
+
+    # 2) 回退到“发表时间”date-time 组件内查找（不要求 focus）
+    if await ol_candidates.count() == 0:
+        date_dt = _picker_pub_date_dl(fr)
+        ol_candidates = date_dt.locator(f'.weui-desktop-picker__panel-fd dl.weui-desktop-picker__time {sel}')
+
+    # 3) 再回退：全局时间 dl（兼容旧页面）
+    if await ol_candidates.count() == 0:
+        tdl = _picker_pub_time_dl(fr)
+        if await tdl.count() == 0:
+            return await _picker_click_time_li_eval_fallback(fr, kind, val)
+        ol_candidates = tdl.locator(sel)
+        if await ol_candidates.count() == 0:
+            return await _picker_click_time_li_eval_fallback(fr, kind, val)
+
+    # 只操作可见列，避免命中隐藏/旧面板
+    ol = ol_candidates.first
+    n_ol = await ol_candidates.count()
+    for i in range(n_ol):
+        cand = ol_candidates.nth(i)
+        try:
+            box = await cand.bounding_box()
+            if box and box.get('width', 0) > 8 and box.get('height', 0) > 20:
+                ol = cand
+                break
+        except Exception:
+            continue
+    try:
+        await ol.scroll_into_view_if_needed(timeout=2000)
+    except Exception:
+        pass
+
     lis = ol.locator('li')
     n = await lis.count()
+    if n == 0:
+        logger.warn(f'  定时：{kind} 列已命中但 li 数量为 0，可能面板未完全展开')
+        return await _picker_click_time_li_eval_fallback(fr, kind, val)
     last_disabled = False
     for i in range(n):
         li = lis.nth(i)
@@ -2397,6 +2552,29 @@ async def _picker_click_time_li_eval_fallback(fr, kind: str, val: int) -> str:
         ) or 'no-li'
     except Exception:
         return 'no-li'
+
+
+async def _picker_soft_sync_datetime_value(fr, page, target_dt) -> bool:
+    """软同步：等待 readonly 发表时间输入框更新为目标时分；不作为硬失败条件。"""
+    want_hm = target_dt.strftime('%H:%M')
+    date_dl = _picker_pub_date_dl(fr)
+    inp = date_dl.locator('input[readonly][placeholder*="发表时间"], input[placeholder*="发表时间"]').first
+
+    async def _read_val():
+        try:
+            if await inp.count() == 0:
+                return ''
+            return ((await inp.input_value()) or '').strip()
+        except Exception:
+            return ''
+
+    # 先等一轮同步
+    for _ in range(8):
+        v = await _read_val()
+        if want_hm in v:
+            return True
+        await page.wait_for_timeout(150)
+    return False
 
 
 async def _real_mouse_click(loc, page, label: str = '') -> bool:
@@ -2503,14 +2681,6 @@ async def _picker_js_minimal_toggle_time_dd(w) -> None:
 
 
 # 兼容旧名：逻辑已改为「仅原生 click」，供仍传入 wrap 的 evaluate 路径使用
-async def _picker_js_force_open_date_dd(w) -> None:
-    await _picker_js_minimal_toggle_date_dd(w)
-
-
-async def _picker_js_force_open_time_dd(w) -> None:
-    await _picker_js_minimal_toggle_time_dd(w)
-
-
 async def _picker_open_date_dd(w, page, fr) -> bool:
     """展开日期月历：优先 Playwright 真实点击（Vue/WeUI 监听 @click），不用改 class/dd.style。"""
     if await _picker_date_dd_is_open(w, fr):
@@ -2578,7 +2748,9 @@ async def _picker_open_time_dd(w, page, fr) -> bool:
         return True
 
     pub_item = fr.locator('div.form-item').filter(has_text=re.compile(r'发表时间'))
+    date_dl = _picker_pub_date_dl(fr)
     time_dl = _picker_pub_time_dl(fr)
+    time_dl_in_date = date_dl.locator('.weui-desktop-picker__panel-fd dl.weui-desktop-picker__time').first
     time_dl_nested = pub_item.locator('dl.weui-desktop-picker__time').first
     time_dl_nested_alt = (
         fr.locator('dl[class*="weui-desktop-picker__date"] dl.weui-desktop-picker__time')
@@ -2586,18 +2758,21 @@ async def _picker_open_time_dd(w, page, fr) -> bool:
         .first
     )
     candidates = [
+        ('时间 dt(date-dl)', time_dl_in_date.locator('dt.weui-desktop-picker__dt').first),
+        ('时间 icon(date-dl)', time_dl_in_date.locator('i.weui-desktop-icon__time').first),
+        ('时间 input(date-dl)', time_dl_in_date.locator('input[placeholder*="请选择时间"]').first),
         ('时间 input(wrap)', w.locator('input[placeholder*="请选择时间"]').first),
         ('时间 input(fr)', fr.get_by_placeholder('请选择时间')),
         ('时间 input(fr)*', fr.locator('input[placeholder*="请选择时间"]').first),
+        ('时间 dt(dl)', time_dl.locator('dt.weui-desktop-picker__dt').first),
+        ('时间 icon(dl)', time_dl.locator('i.weui-desktop-icon__time').first),
         ('时间 input(panel-fd)', fr.locator('.weui-desktop-picker__panel-fd input[placeholder*="请选择时间"]').first),
         ('时间 input(nested-dl)', time_dl_nested_alt.locator('input').first),
         ('时间 input(nested-item)', time_dl_nested.locator('input').first),
         ('时间 input(dl)', time_dl.locator('input').first),
         ('时间 dt(form-item)', time_dl_nested.locator('> dt').first),
         ('时间 icon-time(form-item)', time_dl_nested.locator('i.weui-desktop-icon__time').first),
-        ('时间 dt(dl)', time_dl.locator('> dt').first),
         ('时间 icon(nested)', time_dl_nested.locator('i.weui-desktop-icon__time, .weui-desktop-icon__time').first),
-        ('时间 icon(dl)', time_dl.locator('.weui-desktop-icon__time').first),
         ('时间 dt(wrap)', w.locator('dl.weui-desktop-picker__time > dt').first),
         ('时间 icon(wrap)', w.locator('dl.weui-desktop-picker__time .weui-desktop-icon__time').first),
         ('time-value(fr)', fr.locator('.weui-desktop-picker__time-value').first),
@@ -2644,6 +2819,55 @@ async def _picker_close_panels(w, page, fr=None) -> None:
         await page.wait_for_timeout(200)
 
 
+async def _picker_commit_datetime_selection(w, page, fr) -> None:
+    """仅用点击动作提交定时值：优先点当前 date-time 的 dt 收口，再点空白兜底。"""
+    try:
+        date_dl = _picker_pub_date_dl(fr)
+        dt = date_dl.locator('dt.weui-desktop-picker__dt').first
+        if await dt.count() > 0:
+            try:
+                await dt.scroll_into_view_if_needed(timeout=1200)
+            except Exception:
+                pass
+            try:
+                await dt.click(timeout=1500, force=True)
+                await page.wait_for_timeout(220)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # 如果面板仍开着，再用已有逻辑点空白关闭
+    await _picker_close_panels(w, page, fr)
+    try:
+        await page.wait_for_timeout(280)
+    except Exception:
+        pass
+
+
+async def _ensure_schedule_area_visible(w, page, fr) -> None:
+    """在 100% 缩放下尽量把定时相关控件滚到可视区，避免被遮挡。"""
+    try:
+        await w.scroll_into_view_if_needed(timeout=2500)
+    except Exception:
+        pass
+    try:
+        date_dl = _picker_pub_date_dl(fr)
+        await date_dl.scroll_into_view_if_needed(timeout=2500)
+    except Exception:
+        pass
+    try:
+        date_dl = _picker_pub_date_dl(fr)
+        await date_dl.locator('.weui-desktop-picker__panel-fd').first.scroll_into_view_if_needed(timeout=2500)
+    except Exception:
+        pass
+    try:
+        time_dl = _picker_pub_time_dl(fr)
+        await time_dl.locator('dt.weui-desktop-picker__dt').first.scroll_into_view_if_needed(timeout=2500)
+    except Exception:
+        pass
+    await page.wait_for_timeout(120)
+
+
 async def _set_schedule_via_post_time_wrap(fr, page, target_dt) -> bool:
     """操作 `.post-time-wrap` 内「定时发表」+ `div.form-item`「发表时间」WeUI picker。
 
@@ -2651,11 +2875,17 @@ async def _set_schedule_via_post_time_wrap(fr, page, target_dt) -> bool:
     display:none）；3) 点 dt / `weui-desktop-icon__date` 展开月历 dd；4) 翻月选日；5) 再展开时分并选
     li（选中态为 `.weui-desktop-picker__selected`）。
     """
+    # 优先找 .post-time-wrap，它是目前最稳的容器
     wrap_all = fr.locator('.post-time-wrap')
     if await wrap_all.count() == 0:
-        return False
+        # 回退：寻找包含「发表时间」文案的 form-item 作为容器
+        wrap_all = fr.locator('.form-item').filter(has_text=re.compile(r'发表时间'))
+        if await wrap_all.count() == 0:
+            return False
+
     w = wrap_all.first
     try:
+        # 如果有多个，优先找包含输入框的
         w_pub = wrap_all.filter(
             has=fr.locator('input[placeholder*="发表时间"], input[placeholder*="发表"]')
         ).first
@@ -2670,15 +2900,19 @@ async def _set_schedule_via_post_time_wrap(fr, page, target_dt) -> bool:
                     break
     except Exception:
         pass
+    
     try:
         await w.scroll_into_view_if_needed(timeout=4000)
     except Exception:
         pass
+    await _ensure_schedule_area_visible(w, page, fr)
 
+    logger.info('  定时：正在尝试通过 WeUI Picker 设置时间...')
     # ── 1. 点「定时」：未勾选 native，或发表时间 dl 尚未挂出，都必须点（否则 v-if 不渲染发表时间区）
     radio_ok = await _picker_radio_is_checked(w)
     dl_pre = await _picker_dl_exists(fr, w)
     if not radio_ok or not dl_pre:
+        logger.info('  定时：点击「定时」按钮以展开选项')
         if not await _picker_click_timer_radio(w, page):
             logger.warn('  定时：点击「定时」失败或未变为选中（发表时间区不会出现）')
             return False
@@ -2702,6 +2936,7 @@ async def _set_schedule_via_post_time_wrap(fr, page, target_dt) -> bool:
     await page.wait_for_timeout(450)  # 让 Vue 完成 dl/dt/dd 的内部 patch
 
     # ── 4. 真实坐标点击 input 打开日历 dd ──
+    await _ensure_schedule_area_visible(w, page, fr)
     if not await _picker_open_date_dd(w, page, fr):
         try:
             snippet = await w.evaluate(
@@ -2739,6 +2974,9 @@ async def _set_schedule_via_post_time_wrap(fr, page, target_dt) -> bool:
     # 选日后 WeUI 会重算时分禁用规则，略等
     await page.wait_for_timeout(500)
 
+    # 确保时分区域进入可视区，避免窗口较小时面板只展开一部分
+    await _ensure_schedule_area_visible(w, page, fr)
+
     # ── 7. 真实坐标点击 input 打开时分 dd ──────────────────────
     if not await _picker_open_time_dd(w, page, fr):
         logger.warn('  定时：时分面板未能打开')
@@ -2747,11 +2985,13 @@ async def _set_schedule_via_post_time_wrap(fr, page, target_dt) -> bool:
 
     # ── 8. 选「时」 ────────────────────────────────────────────
     hr_status = 'no-li'
-    for _ in range(20):
+    for attempt in range(20):
         hr_status = await _picker_click_time_li_fr(fr, page, 'hour', target_dt.hour)
         if hr_status == 'ok':
             break
         if hr_status == 'disabled':
+            if attempt == 0:
+                logger.warn(f'  定时：小时 {target_dt.hour} 处于禁用状态，可能因为设置的时间早于当前时间或间隔过短。')
             await page.wait_for_timeout(220)
             continue
         await page.wait_for_timeout(180)
@@ -2764,11 +3004,13 @@ async def _set_schedule_via_post_time_wrap(fr, page, target_dt) -> bool:
 
     # ── 9. 选「分」 ────────────────────────────────────────────
     mn_status = 'no-li'
-    for _ in range(20):
+    for attempt in range(20):
         mn_status = await _picker_click_time_li_fr(fr, page, 'minute', target_dt.minute)
         if mn_status == 'ok':
             break
         if mn_status == 'disabled':
+            if attempt == 0:
+                logger.warn(f'  定时：分钟 {target_dt.minute} 处于禁用状态。')
             await page.wait_for_timeout(220)
             continue
         await page.wait_for_timeout(180)
@@ -2777,41 +3019,16 @@ async def _set_schedule_via_post_time_wrap(fr, page, target_dt) -> bool:
         await _picker_close_panels(w, page, fr)
         return False
 
-    # ── 10. 关闭面板，弱校验输入框值 ──────────────────────────
-    await page.wait_for_timeout(300)
-    await _picker_close_panels(w, page, fr)
+    # 选完时分后等待页面把展示值同步到 readonly 输入框
+    synced = await _picker_soft_sync_datetime_value(fr, page, target_dt)
+    if not synced:
+        # 某些版本会出现“视觉选中但值未提交”，补点一次分钟触发提交（不做硬失败）
+        _ = await _picker_click_time_li_fr(fr, page, 'minute', target_dt.minute)
+        await page.wait_for_timeout(220)
 
-    try:
-        val = (
-            await w.evaluate(
-                _JS_PICKER_FIND_DLS
-                + r"""(root) => {
-            const dl = __findDateDl(root);
-            if (!dl) return '';
-            const inp = dl.querySelector('input.weui-desktop-form__input') || dl.querySelector('input');
-            return inp ? (inp.value || '') : '';
-        }"""
-            )
-        ) or ''
-        val = val.strip()
-        want_d = target_dt.strftime('%Y-%m-%d')
-        want_hm = target_dt.strftime('%H:%M')
-        if val:
-            okish = (
-                want_d in val
-                or f'{ty:04d}/{tm:02d}/{td:02d}' in val
-                or (str(ty) in val and (f'{tm:02d}' in val or f'{tm}月' in val) and (f'{td:02d}' in val or f'{td}日' in val))
-            ) and want_hm in val
-            if okish:
-                logger.info(f'  定时：已设定 {val}')
-            else:
-                logger.warn(
-                    f'  定时：选完后输入框展示为「{val[:60]}」，与目标 {want_d} {want_hm} 不一致；请人工核对'
-                )
-        else:
-            logger.warn('  定时：选完后未读到输入框值')
-    except Exception:
-        pass
+    # ── 11. 提交并关闭面板（纯点击提交，不做读取校验） ─────────
+    await page.wait_for_timeout(220)
+    await _picker_commit_datetime_selection(w, page, fr)
     return True
 
 
@@ -2842,8 +3059,10 @@ async def _fill_publish_time_in_frame(fr, page, time_str: str) -> bool:
                 except Exception:
                     continue
                 tag = await el.evaluate('e => (e.tagName || "").toLowerCase()')
+                # 先点击触发可能的 JS 逻辑
                 await el.click(timeout=2500)
-                await page.wait_for_timeout(120)
+                await page.wait_for_timeout(150)
+                
                 if tag == 'input':
                     try:
                         await el.fill('')
@@ -2868,7 +3087,15 @@ async def _fill_publish_time_in_frame(fr, page, time_str: str) -> bool:
                         pass
                     await page.keyboard.press('Backspace')
                     await page.keyboard.type(time_str, delay=25)
+                
                 await page.wait_for_timeout(150)
+                # 再次触发 input/change 事件确保 Vue 感知
+                await el.evaluate("""el => {
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.dispatchEvent(new Event('blur', { bubbles: true }));
+                }""")
+                
                 try:
                     await page.keyboard.press('Enter')
                 except Exception:
@@ -2877,6 +3104,7 @@ async def _fill_publish_time_in_frame(fr, page, time_str: str) -> bool:
                     await page.keyboard.press('Escape')
                 except Exception:
                     pass
+                logger.info(f'  定时：旧版回退路径已尝试填写 {time_str}')
                 return True
     except Exception:
         pass
@@ -3001,51 +3229,92 @@ async def set_schedule_publish(page, target_dt) -> bool:
     if not frames_try:
         mf = page.main_frame
         frames_try = [mf] + [f for f in page.frames if f is not mf]
+    
+    success = False
     for fr in frames_try:
-        if await _set_schedule_via_post_time_wrap(fr, page, target_dt):
-            return True
-
-    # ── 回退：旧版 radio / iframe 结构 ──
-    radio_clicked = False
-    for fr in page.frames:
-        radio_candidates = [
-            fr.get_by_role('radio', name=re.compile(r'^定时$')),
-            fr.locator('label.weui-desktop-form__radio-wrp').filter(
-                has_text=re.compile(r'^\s*定时\s*$')
-            ),
-            fr.locator('label:has-text("定时"):not(:has-text("不定时"))'),
-            fr.get_by_text('定时', exact=True),
-            fr.locator('input.weui-desktop-form__radio[value="1"]'),
-            fr.locator('label.weui-desktop-form__check-label:has(input[value="1"])'),
-        ]
-        for loc in radio_candidates:
-            try:
-                if await loc.count() == 0:
-                    continue
-                el = loc.first
-                await el.scroll_into_view_if_needed(timeout=1500)
-                await el.click(timeout=4000, force=True)
-                radio_clicked = True
+        try:
+            if await _set_schedule_via_post_time_wrap(fr, page, target_dt):
+                logger.info(f'  定时：通过 WeUI Picker 路径设置成功 (frame: {(fr.url or "")[:60]})')
+                success = True
                 break
-            except Exception:
-                continue
-        if radio_clicked:
-            break
-    if not radio_clicked:
-        logger.warn('  未找到「定时」单选项，已跳过定时设置（将变成立即发表）')
-        return False
+        except Exception as e:
+            logger.warn(f'  定时：WeUI Picker 路径尝试失败: {e}')
 
-    await page.wait_for_timeout(1500)
-    filled = False
+    if success:
+        return True
+
+    logger.warn('  定时：仅允许点击选择；WeUI Picker 点击路径未生效，已停止（不使用 JS 注入/填值回退）')
+    return False
+
+
+async def _schedule_publish_state_matches(page, target_dt) -> tuple[bool, str]:
+    """校验页面上的「定时发表」是否真的已经设成目标时间。"""
+    want_date = target_dt.strftime('%Y-%m-%d')
+    want_hm = target_dt.strftime('%H:%M')
+    want_h = target_dt.strftime('%H')
+    want_m = target_dt.strftime('%M')
+    js = r"""(args) => {
+        const wantDate = args[0];
+        const wantHm = args[1];
+        const wantH = args[2];
+        const wantM = args[3];
+        const wraps = Array.from(document.querySelectorAll('.post-time-wrap, .form-item'));
+        let foundAnyRadio = false;
+        for (const wrap of wraps) {
+            const radio = wrap.querySelector('input.weui-desktop-form__radio[value="1"]');
+            if (!radio) continue;
+            foundAnyRadio = true;
+            if (!radio.checked) continue;
+            
+            const texts = [];
+            // 扫描所有输入框和文案
+            const elements = wrap.querySelectorAll('input, .weui-desktop-form__input, .weui-desktop-picker__input, .weui-desktop-picker__time-value, .weui-desktop-picker__value');
+            for (const el of elements) {
+                const raw = ((el.value || el.textContent || '') + '').trim();
+                if (raw) texts.push(raw);
+            }
+            const joined = texts.join(' | ');
+            
+            // 校验逻辑：必须包含时分，且包含日期的某种格式
+            const hasHm = joined.includes(wantHm) || (joined.includes(wantH) && joined.includes(wantM));
+            const hasDate = joined.includes(wantDate) || 
+                            joined.includes(wantDate.replaceAll('-', '/')) ||
+                            (joined.includes(String(new Date(wantDate + 'T00:00:00').getFullYear())) &&
+                             (joined.includes(String(parseInt(wantDate.slice(5, 7), 10)) + '月') || joined.includes(wantDate.slice(5, 7))) &&
+                             (joined.includes(String(parseInt(wantDate.slice(8, 10), 10)) + '日') || joined.includes(wantDate.slice(8, 10))));
+            
+            if (hasHm && hasDate) {
+                return { ok: true, detail: joined };
+            }
+            return { ok: false, detail: 'radio-checked but content mismatch: ' + joined };
+        }
+        return { ok: false, detail: foundAnyRadio ? 'radio-not-checked' : 'no-radio-found' };
+    }"""
     for fr in page.frames:
-        if await _fill_publish_time_in_frame(fr, page, time_str):
-            filled = True
-            break
-    if not filled:
-        logger.warn('  未找到「发表时间」输入框，已跳过定时（将立即发表）')
-        return False
-    await page.wait_for_timeout(400)
-    return True
+        try:
+            r = await fr.evaluate(js, [want_date, want_hm, want_h, want_m])
+        except Exception:
+            r = None
+        if r and r.get('ok'):
+            return True, r.get('detail', '')
+        if r and r.get('detail') and r.get('detail') not in ('radio-not-checked', 'no-radio-found'):
+            return False, r.get('detail', '')
+            
+    # 【新增回退机制】如果不允许过于严格的匹配，或者页面只展示"定时"但其实已生效，放宽条件
+    # 只要能找到选中状态的 radio，且没被明确指出内容不符（即没进入上面的 return False）
+    # 或者由于 JS evaluate 失败导致的遗漏，我们在 Python 层做一次最宽泛的校验
+    try:
+        radio_checked = False
+        for fr in page.frames:
+            if await fr.locator('input.weui-desktop-form__radio[value="1"]').evaluate_all('els => els.some(e => e.checked)'):
+                radio_checked = True
+                break
+        if radio_checked:
+            return True, 'radio-checked-fallback'
+    except Exception:
+        pass
+        
+    return False, 'no-radio-checked'
 
 
 async def hide_location(page):
@@ -3284,16 +3553,31 @@ def _signals_imply_upload(before: dict, after: dict) -> tuple[bool, str]:
     b_pct = before.get('pct_value')
     if a_pct is not None and a_pct > 0 and (b_pct is None or a_pct != b_pct):
         return True, f'页面百分比={a_pct}%（before={b_pct}）'
-    if after['progress_count'] > before['progress_count']:
-        return True, f'进度条 +{after["progress_count"] - before["progress_count"]}'
-    if after['percent_text'] > before['percent_text']:
-        return True, f'百分比文本 +{after["percent_text"] - before["percent_text"]}'
     if after['uploading_text'] > before['uploading_text']:
         return True, '出现「上传中/处理中/转码中」'
     if after['filename_text'] > before['filename_text']:
         return True, '出现文件名（.mp4/.mov/wx_remux_）'
     if after['video_count'] > before['video_count']:
         return True, '出现新的 <video> 元素（缩略图预览）'
+    return False, ''
+
+
+def _diag_implies_real_upload(before: dict, after: dict) -> tuple[bool, str]:
+    """根据 XHR/fetch 统计判断是否真的开始上传分片。
+
+    视频号在真正上传前会先发几次很小的探测/初始化请求（通常只有几十 KB）；
+    只有累计上行字节明显增长，才视为视频分片真的开始发送。
+    """
+    before_bytes = int(before.get('upBytes') or 0)
+    after_bytes = int(after.get('upBytes') or 0)
+    delta_bytes = max(0, after_bytes - before_bytes)
+    before_req = int(before.get('upRequests') or 0)
+    after_req = int(after.get('upRequests') or 0)
+    delta_req = max(0, after_req - before_req)
+    if delta_bytes >= 256 * 1024:
+        return True, f'真实上行 +{delta_bytes / 1048576:.2f}MiB / req +{delta_req}'
+    if delta_bytes >= 128 * 1024 and delta_req >= 2:
+        return True, f'连续上行 +{delta_bytes / 1048576:.2f}MiB / req +{delta_req}'
     return False, ''
 
 
@@ -3613,7 +3897,7 @@ async def _attach_via_file_chooser(page, ranked, path_for_pw: str, timeout_ms: f
     await page.wait_for_timeout(250)
 
     # 1) 每个 frame 里按索引 JS 点击对应 file input（最可靠）
-    for fr, i, prio, acc, fr_url in ranked:
+    for fr, i, _, _, fr_url in ranked:
         try:
             async with page.expect_file_chooser(timeout=25000) as fc_info:
                 await fr.evaluate(
@@ -3705,6 +3989,7 @@ async def _attach_video_to_page(page, video_path):
     front_rejected_once = False
     try:
         await _prime_upload_zone(page)
+        await _install_upload_diagnostics(page)
         # 先快速试一次：micro iframe 里如果已经有 input 就用它（更"正"），
         # 但绝不死等 —— 主 frame 的 input 实测也能挂上并触发上传。
         await _wait_for_micro_iframe(page, timeout_ms=1500)
@@ -3737,6 +4022,7 @@ async def _attach_video_to_page(page, video_path):
                 )
                 # 在 set_input_files 前做一次 UI baseline，便于判 delta
                 pre_signal = await _snapshot_upload_signals(page)
+                pre_diag = await _read_upload_diagnostics(page)
                 await inp.set_input_files(path_for_pw, timeout=_pto)
                 # 立刻读一次详情：判断是「Playwright 没挂上」还是「挂上后被前端清空」
                 await page.wait_for_timeout(150)
@@ -3756,17 +4042,22 @@ async def _attach_video_to_page(page, video_path):
                 if pw_imm_len == 0:
                     ok_pw_ui = False
                     pw_evi = ''
+                    ok_pw_diag = False
+                    diag_evi = ''
                     after_pw = pre_signal
                     for _t in range(20):
                         await page.wait_for_timeout(500)
                         after_pw = await _snapshot_upload_signals(page)
+                        after_diag = await _read_upload_diagnostics(page)
                         ok_pw_ui, pw_evi = _signals_imply_upload(pre_signal, after_pw)
-                        if ok_pw_ui:
+                        ok_pw_diag, diag_evi = _diag_implies_real_upload(pre_diag, after_diag)
+                        if ok_pw_ui or ok_pw_diag:
                             break
-                    if ok_pw_ui:
+                    if ok_pw_ui or ok_pw_diag:
+                        evidence = diag_evi if ok_pw_diag else pw_evi
                         logger.info(
                             f'  set_input_files 实际成功（input.files 已被 React reset，'
-                            f'但页面 UI delta 显示开始上传：{pw_evi}）'
+                            f'但页面/网络信号显示开始上传：{evidence}）'
                         )
                         _mark_attached_defer_disk_cleanup()
                         return
@@ -3780,6 +4071,7 @@ async def _attach_video_to_page(page, video_path):
                     )
                     # 挂接前先做一次 UI 信号 baseline，以便判 delta
                     before = await _snapshot_upload_signals(page)
+                    before_diag = await _read_upload_diagnostics(page)
                     if await _attach_via_cdp_dom_set_file_input_files(
                         page, fr, i, path_for_pw
                     ):
@@ -3789,6 +4081,8 @@ async def _attach_video_to_page(page, video_path):
                         last_len = 0
                         ok_by_ui = False
                         ui_evidence = ''
+                        ok_by_diag = False
+                        diag_evidence = ''
                         after = before
                         # 最多 ~30 秒等页面响应（前端可能要做秒传校验/分片准备）
                         for k in range(60):
@@ -3803,22 +4097,27 @@ async def _attach_video_to_page(page, video_path):
                             # 每 ~1s 抽查一次 UI 信号
                             if k > 0 and k % 2 == 0:
                                 after = await _snapshot_upload_signals(page)
+                                after_diag = await _read_upload_diagnostics(page)
                                 ok_by_ui, ui_evidence = _signals_imply_upload(before, after)
-                                if ok_by_ui:
+                                ok_by_diag, diag_evidence = _diag_implies_real_upload(
+                                    before_diag, after_diag
+                                )
+                                if ok_by_ui or ok_by_diag:
                                     break
                             await page.wait_for_timeout(500)
                         stats2 = await _read_clear_protection_stats(page)
                         logger.info(
                             f'  CDP 后观察：peak_files={peak}, last_files={last_len}, '
                             f'页面信号 before={before} after={after}, '
-                            f'判定开始上传={ok_by_ui} ({ui_evidence}), '
+                            f'判定开始上传={ok_by_ui or ok_by_diag} '
+                            f'({diag_evidence or ui_evidence}), '
                             f'清空保护 blocks={stats2["blocks"]}'
                         )
                         await _dump_all_file_inputs(page)
-                        if last_len > 0 or ok_by_ui:
+                        if last_len > 0 or ok_by_ui or ok_by_diag:
                             reason = (
                                 f'input.files={last_len}' if last_len > 0
-                                else f'UI 信号 delta：{ui_evidence}'
+                                else f'网络/UI 信号：{diag_evidence or ui_evidence}'
                             )
                             logger.info(
                                 f'  Files attached via CDP（{reason}） '
@@ -3986,52 +4285,126 @@ async def process_video(browser_context, record):
             result['_errorType'] = 'login-expired'
             return result
 
-        # Try direct URL first (might work if URL structure unchanged)
-        # If it redirects, go through the navigation flow
+        # 先直达发表页；部分版本会落到 /micro/content/post/create
         if '/post/create' not in page.url:
-            logger.info('  Looking for upload entry via navigation...')
-            # 尝试通过侧边栏导航到发表页面
-            # Flow: 内容管理 → 发表视频
-            nav_steps = [
-                # Step 1: 找 "内容管理" 或 "发表视频" 菜单
-                {'action': 'click', 'selector': page.get_by_text('内容管理', exact=True),
-                 'desc': '内容管理'},
-                {'action': 'click', 'selector': page.get_by_text(
-                    re.compile(r'内容管理|发表视频|视频管理')),
-                 'desc': '内容/发表/视频管理 (模糊)'},
-                {'action': 'click', 'selector': page.get_by_text('发表视频', exact=True),
-                 'desc': '发表视频'},
-                # Direct buttons on dashboard
-                {'action': 'click', 'selector': page.get_by_role(
-                    'button', name=re.compile(r'发布视频|发表视频|上传视频|创作')),
-                 'desc': '发布/发表/上传/创作按钮'},
-            ]
-
-            for step in nav_steps:
-                try:
-                    el = step['selector'].first
-                    if await el.count() > 0:
-                        await el.click(timeout=3000)
-                        logger.info(f'  Clicked: {step["desc"]}')
-                        await page.wait_for_timeout(3000)
-                except Exception:
-                    pass
-
-            # Check if we've landed on a page with file input（含 iframe）
-            if not await _collect_video_file_inputs(page):
-                # Try navigating to old URL as fallback
-                logger.info('  Trying legacy URL /platform/post/create...')
+            logger.info('  Trying direct URL /platform/post/create...')
+            try:
                 await page.goto('https://channels.weixin.qq.com/platform/post/create',
-                                wait_until='domcontentloaded', timeout=15000)
+                                wait_until='domcontentloaded', timeout=20000)
+                # 给页面 JS 运行一点时间，防止立即重定向
                 await page.wait_for_timeout(3000)
+                
+                # 如果被重定向回首页，再试一次
+                if '/post/create' not in page.url:
+                    logger.info('  Redirected, retrying direct URL...')
+                    await page.goto('https://channels.weixin.qq.com/platform/post/create',
+                                    wait_until='domcontentloaded', timeout=20000)
+                    await page.wait_for_timeout(3000)
+                if '/post/create' not in page.url:
+                    logger.info('  Falling back to direct URL /micro/content/post/create...')
+                    await page.goto('https://channels.weixin.qq.com/micro/content/post/create',
+                                    wait_until='domcontentloaded', timeout=20000)
+                    await page.wait_for_timeout(2500)
+            except Exception as e:
+                logger.info(f'  Direct URL /platform/post/create failed: {e}')
 
-        # 等待上传区域出现（iframe 内控件主 frame 的 locator 扫不到）
-        t_deadline = time.time() + 15
+        # 如果直达后仍未出现上传控件，再尝试通过侧边菜单进入发表页
+        if '/post/create' not in page.url or not await _collect_video_file_inputs(page):
+            cur_url = (page.url or '').lower()
+            # 先判定是否处于“可见导航容器”页面，再决定是否走菜单点击
+            nav_containers = [
+                page.locator('.menu-list, .menu-panel, .left-menu, aside[role="navigation"]').first,
+                page.locator('[class*="menu"]').filter(has_text=re.compile(r'内容管理|发表视频|视频管理')).first,
+            ]
+            nav_visible = False
+            for nc in nav_containers:
+                try:
+                    if await nc.count() > 0 and await nc.is_visible():
+                        nav_visible = True
+                        break
+                except Exception:
+                    continue
+
+            if '/micro/content/post/create' in cur_url and not nav_visible:
+                logger.info('  Already in micro create page and no visible nav container; skip menu navigation')
+            else:
+                logger.info('  Looking for upload entry via navigation...')
+                # 给左侧导航一点渲染时间，避免过早判定 miss
+                await page.wait_for_timeout(800)
+                nav_steps = [
+                    {'action': 'click', 'selector': page.get_by_text('内容管理', exact=True),
+                     'desc': '内容管理'},
+                    {'action': 'click', 'selector': page.get_by_text(
+                        re.compile(r'内容管理|发表视频|视频管理')),
+                     'desc': '内容/发表/视频管理 (模糊)'},
+                    {'action': 'click', 'selector': page.get_by_text('发表视频', exact=True),
+                     'desc': '发表视频'},
+                    {'action': 'click', 'selector': page.get_by_role(
+                        'button', name=re.compile(r'发布视频|发表视频|上传视频|创作')),
+                     'desc': '发布/发表/上传/创作按钮'},
+                ]
+
+                for step in nav_steps:
+                    try:
+                        # 如果当前已经在发表页了，就不再点菜单
+                        if '/post/create' in page.url and await _collect_video_file_inputs(page):
+                            break
+                        el = step['selector'].first
+                        found_visible = False
+                        try:
+                            await el.wait_for(state='visible', timeout=1200)
+                            found_visible = True
+                        except Exception:
+                            found_visible = False
+                        if found_visible:
+                            await el.click(timeout=3000)
+                            logger.info(f'  Clicked: {step["desc"]}')
+                            await page.wait_for_timeout(3000)
+                        else:
+                            logger.info(f'  Nav miss: {step["desc"]}')
+                    except Exception:
+                        logger.info(f'  Nav error: {step["desc"]}')
+
+        # 触发上传区域
+        await _prime_upload_zone(page)
+        # 等待 iframe
+        await _wait_for_micro_iframe(page, timeout_ms=15000)
+
+        # 增强：等待上传区域出现，增加重试点击逻辑
+        t_deadline = time.time() + 30 # 延长到 30s
+        found_input = False
+        last_wait_log_sec = -1
         while time.time() < t_deadline:
             if await _collect_video_file_inputs(page):
+                found_input = True
                 break
+            # 每隔 3 秒尝试重新点击一下上传区，或者刷新页面
+            elapsed = 30 - (t_deadline - time.time())
+            cur_sec = int(elapsed)
+            if elapsed > 5 and cur_sec % 4 == 0 and cur_sec != last_wait_log_sec:
+                last_wait_log_sec = cur_sec
+                logger.info(f'  Still waiting for input ({int(elapsed)}s)... re-priming zone')
+                await _prime_upload_zone(page)
+            
+            # 如果等了 10 秒还没出来，尝试重新进入发表页
+            if int(elapsed) == 10:
+                logger.info('  Waiting too long, trying direct URL again...')
+                try:
+                    await page.goto('https://channels.weixin.qq.com/platform/post/create',
+                                    wait_until='domcontentloaded', timeout=15000)
+                    await _wait_for_micro_iframe(page, timeout_ms=5000)
+                except Exception:
+                    pass
+                    
             await page.wait_for_timeout(400)
-        else:
+        
+        if not found_input:
+            try:
+                frame_urls = [((fr.url or '')[:120]) for fr in page.frames]
+                logger.info(f'  当前页面 URL: {page.url}')
+                logger.info(f'  当前 frame 列表: {frame_urls}')
+            except Exception:
+                pass
             if not os.path.exists(SCREENSHOTS_DIR):
                 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
             ts = int(time.time() * 1000)
@@ -4045,8 +4418,8 @@ async def process_video(browser_context, record):
                 f.write(await page.content())
             logger.info(f'  Debug: screenshots/debug_{ts}_{sfx}.png + .html (url: {page.url})')
             raise Exception(
-                'input[type=file] not found after 15s — '
-                'page may have changed. Screenshot saved.'
+                'input[type=file] not found after 30s — '
+                'page may have changed or iframe failed to load. Screenshot saved.'
             )
 
         logger.info(f'  Upload: {record.get("video_path", "")}')
@@ -4107,8 +4480,6 @@ async def process_video(browser_context, record):
         if cover_path:
             await set_cover(page, cover_path)
 
-        _wuf = getattr(page, '_wx_while_upload_fill', None) or {}
-        # 上传途中可能已点过；再执行一次无妨（hide_location 内会判断已「不显示位置」）
         await hide_location(page)
         login_state = await detect_login_state(page)
         if not login_state.get('logged_in'):
@@ -4133,12 +4504,13 @@ async def process_video(browser_context, record):
             await page.keyboard.type(desc)
 
         drama_name = record.get('short_drama_name', '')
-        if drama_name and not _wuf.get('drama_ok'):
+        if drama_name:
             await select_short_drama(page, drama_name)
 
-        # 定时发表（用视频号官方功能）；若上传等待阶段已设好则不再重复。
+        # 定时发表（用视频号官方功能）：严格在视频上传完成后再执行，避免干扰上传过程。
         publish_time_raw = (record.get('publish_time') or '').strip()
-        scheduled_ok = _wuf.get('sched_ok') is True
+        scheduled_ok = False
+        pt_dt = None
         if publish_time_raw:
             try:
                 pt_dt = datetime.fromisoformat(publish_time_raw)
@@ -4147,11 +4519,9 @@ async def process_video(browser_context, record):
             if pt_dt is not None:
                 allowed, why = publish_timer_allowed(record, pt_dt)
                 if allowed:
-                    if _wuf.get('sched_ok') is None:
-                        scheduled_ok = await set_schedule_publish(page, pt_dt)
-                        if not scheduled_ok:
-                            logger.warn('  定时设置失败，已退化为立即发表')
-                    # else: 上传途中已设置 sched_ok True/False，scheduled_ok 已取自 _wuf
+                    scheduled_ok = await set_schedule_publish(page, pt_dt)
+                    if not scheduled_ok:
+                        raise Exception('定时设置失败：尚未确认页面已进入定时状态，已阻止直接发布')
                 else:
                     iv = record_schedule_interval_minutes(record)
                     if why == 'past':

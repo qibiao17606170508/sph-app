@@ -1,6 +1,6 @@
 # 视频号批量上传工具
 
-将视频批量上传到微信视频号的 Windows 桌面应用。基于 Playwright 浏览器自动化，支持多账号管理。
+将视频批量上传到微信视频号的桌面应用。基于 Playwright 浏览器自动化，支持多账号管理。
 
 ## 功能
 
@@ -13,9 +13,17 @@
 
 ## 快速开始
 
-从 [Releases](../../releases) 下载最新版本，解压后双击 `视频号批量上传.exe` 即可使用。
+从 [Releases](../../releases) 下载最新版本：
 
-**系统要求**：Windows 10 1809+ 或 Windows 11（WebView2 系统自带）。
+- Windows：解压后双击 `视频号批量上传.exe`
+- macOS：打开 `视频号批量上传.app`
+
+应用始终以原生桌面窗口运行，不提供浏览器回退模式。
+
+**系统要求**
+
+- Windows 10 1809+ 或 Windows 11；Windows 发布包内已携带 WebView2 安装器，缺失时会优先离线自动安装
+- macOS；打包和开发环境需安装 `pyobjc` 相关依赖
 
 ## 开发
 
@@ -27,7 +35,7 @@ playwright install chromium
 # 启动开发服务器
 python run.py
 
-# 打包为 exe
+# 打包为桌面 app
 python build.py
 ```
 

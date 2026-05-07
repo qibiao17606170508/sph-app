@@ -1,13 +1,15 @@
 """视频号批量上传工具 - 桌面版入口"""
 import os
-import shutil
+import queue
+import subprocess
 import sys
+import tempfile
 import time
 import threading
 import urllib.error
 import urllib.request
 import webbrowser
-import subprocess
+from datetime import datetime
 
 # 确保在可写数据目录运行
 _BASE = os.environ.get('APP_BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
@@ -16,6 +18,150 @@ os.chdir(_BASE)
 # 确保必要目录存在
 for d in ['uploads', 'screenshots', 'browser-profiles']:
     os.makedirs(os.path.join(_BASE, d), exist_ok=True)
+
+_RES_DIR = os.environ.get('APP_RES_DIR', _BASE)
+_WEBVIEW2_BOOTSTRAPPER_URL = os.environ.get(
+    'WEBVIEW2_BOOTSTRAPPER_URL',
+    'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+)
+
+
+class InstallProgressDialog:
+    """Windows 下的轻量安装进度窗口。"""
+
+    def __init__(self, title):
+        self.title = title
+        self._queue = queue.Queue()
+        self._ready = threading.Event()
+        self._thread = None
+        self._available = sys.platform == 'win32'
+
+    def start(self, message, progress=None, indeterminate=False):
+        if not self._available:
+            return
+        try:
+            __import__('tkinter')
+            __import__('tkinter.ttk')
+        except Exception as e:
+            append_app_log(f'安装进度条不可用，将退回日志提示: {e}')
+            self._available = False
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(message, progress, indeterminate),
+            daemon=True,
+        )
+        self._thread.start()
+        self._ready.wait(timeout=5)
+
+    def update(self, message=None, progress=None, indeterminate=None):
+        if self._available:
+            self._queue.put({
+                'action': 'update',
+                'message': message,
+                'progress': progress,
+                'indeterminate': indeterminate,
+            })
+
+    def close(self):
+        if self._available:
+            self._queue.put({'action': 'close'})
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=2)
+
+    def _run(self, message, progress, indeterminate):
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title(self.title)
+        root.geometry('420x140')
+        root.resizable(False, False)
+        root.attributes('-topmost', True)
+        try:
+            root.iconbitmap(default=get_icon_path() or '')
+        except Exception:
+            pass
+
+        frame = ttk.Frame(root, padding=16)
+        frame.pack(fill='both', expand=True)
+
+        title_label = ttk.Label(frame, text=self.title)
+        title_label.pack(anchor='w')
+
+        message_var = tk.StringVar(value=message or '')
+        message_label = ttk.Label(frame, textvariable=message_var, wraplength=380)
+        message_label.pack(anchor='w', pady=(8, 10))
+
+        progress_var = tk.DoubleVar(value=float(progress or 0))
+        percent_var = tk.StringVar(value='')
+        progress_bar = ttk.Progressbar(
+            frame,
+            orient='horizontal',
+            length=380,
+            mode='determinate',
+            maximum=100,
+            variable=progress_var,
+        )
+        progress_bar.pack(fill='x')
+
+        percent_label = ttk.Label(frame, textvariable=percent_var)
+        percent_label.pack(anchor='e', pady=(8, 0))
+
+        def apply_state(msg=None, pct=None, is_indeterminate=None):
+            if msg is not None:
+                message_var.set(msg)
+            if is_indeterminate is None:
+                is_indeterminate = progress_bar.cget('mode') == 'indeterminate'
+            if is_indeterminate:
+                if progress_bar.cget('mode') != 'indeterminate':
+                    progress_bar.configure(mode='indeterminate')
+                    progress_bar.start(10)
+                percent_var.set('正在安装...')
+            else:
+                if progress_bar.cget('mode') != 'determinate':
+                    progress_bar.stop()
+                    progress_bar.configure(mode='determinate')
+                if pct is not None:
+                    pct = max(0, min(100, float(pct)))
+                    progress_var.set(pct)
+                percent_var.set(f'{int(progress_var.get())}%')
+
+        def center_window():
+            root.update_idletasks()
+            width = root.winfo_width()
+            height = root.winfo_height()
+            x = (root.winfo_screenwidth() // 2) - (width // 2)
+            y = (root.winfo_screenheight() // 2) - (height // 2)
+            root.geometry(f'{width}x{height}+{x}+{y}')
+
+        def poll():
+            try:
+                while True:
+                    item = self._queue.get_nowait()
+                    if item.get('action') == 'close':
+                        try:
+                            progress_bar.stop()
+                        except Exception:
+                            pass
+                        root.destroy()
+                        return
+                    if item.get('action') == 'update':
+                        apply_state(
+                            msg=item.get('message'),
+                            pct=item.get('progress'),
+                            is_indeterminate=item.get('indeterminate'),
+                        )
+            except queue.Empty:
+                pass
+            root.after(100, poll)
+
+        apply_state(message, progress, indeterminate)
+        center_window()
+        self._ready.set()
+        root.protocol('WM_DELETE_WINDOW', lambda: None)
+        root.after(100, poll)
+        root.mainloop()
 
 
 def configure_webview():
@@ -46,7 +192,9 @@ def configure_webview():
 
 
 def get_icon_path():
-    """返回应用图标路径，不存在则返回 None。"""
+    """仅在 Windows 返回应用图标路径。"""
+    if sys.platform != 'win32':
+        return None
     candidates = [
         os.path.join(_BASE, 'app.ico'),
         os.path.join(os.environ.get('APP_RES_DIR', _BASE), 'app.ico'),
@@ -55,6 +203,15 @@ def get_icon_path():
         if path and os.path.isfile(path):
             return path
     return None
+
+
+def append_app_log(message):
+    try:
+        log_path = os.path.join(_BASE, 'app.log')
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(f'[{datetime.now()}] {message}\n')
+    except Exception:
+        pass
 
 
 def has_webview2_runtime():
@@ -105,102 +262,191 @@ def has_webview2_runtime():
 
 def notify_missing_webview2():
     message = (
-        '检测到当前 Windows 正在使用旧版 MSHTML 内核，界面和登录功能会异常。\n'
-        '请先安装 Microsoft Edge WebView2 Runtime 后再打开软件。\n'
-        '安装完成后重新启动即可。'
+        '当前 Windows 缺少 Microsoft Edge WebView2 Runtime，且自动安装未成功。\n'
+        '请手动安装 WebView2 Runtime，安装完成后重新打开软件。'
     )
-    print(f'[错误] {message}')
-    try:
-        if sys.platform == 'win32':
-            import ctypes
-            ctypes.windll.user32.MessageBoxW(0, message, '缺少 WebView2 Runtime', 0x10)
-    except Exception:
-        pass
+    show_error_dialog('缺少 WebView2 Runtime', message)
     try:
         webbrowser.open('https://developer.microsoft.com/microsoft-edge/webview2/')
     except Exception:
         pass
 
 
-def find_chrome_executable():
-    custom = os.environ.get('CHROME_PATH', '').strip()
-    candidates = [custom] if custom else []
-
-    if sys.platform == 'win32':
-        for env_name in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'):
-            root = os.environ.get(env_name, '').strip()
-            if root:
-                candidates.append(os.path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'))
-    elif sys.platform == 'darwin':
-        candidates += [
-            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-            os.path.expanduser('~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
-        ]
-    else:
-        which_path = shutil.which('google-chrome') or shutil.which('chrome') or shutil.which('chromium')
-        if which_path:
-            candidates.append(which_path)
-
+def find_local_webview2_bootstrapper():
+    candidates = [
+        os.path.join(_BASE, 'MicrosoftEdgeWebview2Setup.exe'),
+        os.path.join(_BASE, 'MicrosoftEdgeWebView2Setup.exe'),
+        os.path.join(_RES_DIR, 'MicrosoftEdgeWebview2Setup.exe'),
+        os.path.join(_RES_DIR, 'MicrosoftEdgeWebView2Setup.exe'),
+    ]
     for path in candidates:
-        if path and os.path.isfile(path):
+        if os.path.isfile(path):
             return path
     return ''
 
 
-def notify_missing_chrome():
-    message = (
-        '未检测到谷歌浏览器。\n'
-        '请先安装 Google Chrome 后再打开软件。'
+def download_webview2_bootstrapper(progress_dialog=None):
+    target_path = os.path.join(tempfile.gettempdir(), 'MicrosoftEdgeWebview2Setup.exe')
+    append_app_log(f'开始下载 WebView2 安装器: {_WEBVIEW2_BOOTSTRAPPER_URL}')
+    req = urllib.request.Request(
+        _WEBVIEW2_BOOTSTRAPPER_URL,
+        headers={'User-Agent': 'Mozilla/5.0 sph-app WebView2 Bootstrapper'}
     )
-    print(f'[错误] {message}')
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        total = 0
+        try:
+            total = int(resp.headers.get('Content-Length') or '0')
+        except Exception:
+            total = 0
+        downloaded = 0
+        with open(target_path, 'wb') as f:
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if progress_dialog:
+                    if total > 0:
+                        pct = min(100, downloaded * 100.0 / total)
+                        progress_dialog.update(
+                            message='正在下载 WebView2 运行库安装器...',
+                            progress=pct,
+                            indeterminate=False,
+                        )
+                    else:
+                        progress_dialog.update(
+                            message='正在下载 WebView2 运行库安装器...',
+                            indeterminate=True,
+                        )
+    append_app_log(f'WebView2 安装器已下载到: {target_path}')
+    return target_path
+
+
+def ensure_webview2_runtime():
+    if sys.platform != 'win32':
+        return True
+    if has_webview2_runtime():
+        return True
+
+    progress_dialog = InstallProgressDialog('正在安装 WebView2')
+    try:
+        installer_path = find_local_webview2_bootstrapper()
+        if installer_path:
+            append_app_log(f'检测到本地 WebView2 安装器: {installer_path}')
+            progress_dialog.start(
+                '检测到系统缺少 WebView2 Runtime，正在准备安装...',
+                progress=0,
+                indeterminate=False,
+            )
+            progress_dialog.update(
+                message='已找到安装器，正在启动安装...',
+                progress=100,
+                indeterminate=False,
+            )
+        else:
+            progress_dialog.start(
+                '检测到系统缺少 WebView2 Runtime，正在下载安装器...',
+                progress=0,
+                indeterminate=False,
+            )
+            installer_path = download_webview2_bootstrapper(progress_dialog=progress_dialog)
+
+        progress_dialog.update(
+            message='正在安装 WebView2 Runtime，请稍候...',
+            indeterminate=True,
+        )
+        append_app_log(f'开始静默安装 WebView2 Runtime: {installer_path}')
+        result = subprocess.run(
+            [installer_path, '/silent', '/install'],
+            check=False,
+            timeout=600,
+        )
+        append_app_log(f'WebView2 安装器退出码: {result.returncode}')
+    except Exception as e:
+        append_app_log(f'执行 WebView2 安装器失败: {e}')
+        progress_dialog.close()
+        return False
+
+    for _ in range(20):
+        if has_webview2_runtime():
+            append_app_log('WebView2 Runtime 安装成功')
+            progress_dialog.update(
+                message='WebView2 Runtime 安装成功，正在继续启动应用...',
+                progress=100,
+                indeterminate=False,
+            )
+            time.sleep(0.5)
+            progress_dialog.close()
+            return True
+        time.sleep(1)
+
+    append_app_log('WebView2 Runtime 安装后仍未检测到可用运行库')
+    progress_dialog.close()
+    return False
+
+
+def show_error_dialog(title, message):
+    print(f'[错误] {title}: {message}')
     try:
         if sys.platform == 'win32':
             import ctypes
-            ctypes.windll.user32.MessageBoxW(0, message, '缺少谷歌浏览器', 0x10)
+            ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)
+            return
+        if sys.platform == 'darwin':
+            import subprocess
+            script = f'display alert "{title}" message "{message.replace(chr(34), chr(39))}" as critical'
+            subprocess.run(['osascript', '-e', script], check=False)
+            return
     except Exception:
         pass
+
+
+def show_info_dialog(title, message):
+    print(f'[提示] {title}: {message}')
     try:
-        webbrowser.open('https://www.google.com/chrome/')
+        if sys.platform == 'win32':
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, message, title, 0x40)
+            return
+        if sys.platform == 'darwin':
+            script = f'display dialog "{message.replace(chr(34), chr(39))}" with title "{title}" buttons {{"确定"}} default button "确定"'
+            subprocess.run(['osascript', '-e', script], check=False)
+            return
     except Exception:
         pass
 
 
-def open_chrome_app():
-    """Windows 下优先直接使用谷歌浏览器应用窗口模式打开。"""
-    chrome_path = find_chrome_executable()
-    if not chrome_path:
-        notify_missing_chrome()
-        return False
+def notify_missing_desktop_runtime(missing_modules):
+    modules_text = ', '.join(missing_modules)
+    if sys.platform == 'win32':
+        message = (
+            '桌面应用运行依赖缺失，无法打开原生窗口。\n'
+            f'缺少模块: {modules_text}\n'
+            '请重新执行依赖安装或使用完整打包版本。'
+        )
+    elif sys.platform == 'darwin':
+        message = (
+            'macOS 桌面运行依赖缺失，无法打开原生窗口。\n'
+            f'缺少模块: {modules_text}\n'
+            '请重新执行依赖安装或重新打包应用。'
+        )
+    else:
+        message = (
+            '桌面运行依赖缺失，无法打开原生窗口。\n'
+            f'缺少模块: {modules_text}'
+        )
+    show_error_dialog('桌面运行依赖缺失', message)
+    append_app_log(message)
 
-    profile_dir = os.path.join(_BASE, 'chrome-shell-profile')
-    os.makedirs(profile_dir, exist_ok=True)
-    app_url = f'http://127.0.0.1:{PORT}'
-    cmd = [
-        chrome_path,
-        f'--app={app_url}',
-        '--new-window',
-        '--no-first-run',
-        '--disable-session-crashed-bubble',
-        '--disable-features=TranslateUI',
-        f'--user-data-dir={profile_dir}',
-        '--window-size=1200,800',
-    ]
-    print(f'[启动] 使用谷歌浏览器打开: {chrome_path}')
-    try:
-        proc = subprocess.Popen(cmd)
-    except Exception as e:
-        print(f'[错误] 启动谷歌浏览器失败: {e}')
-        notify_missing_chrome()
-        return False
 
-    try:
-        proc.wait()
-    except KeyboardInterrupt:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-    return True
+def notify_desktop_launch_failure(error):
+    message = (
+        '桌面应用启动失败，本次不会回退到浏览器模式。\n'
+        f'详细错误: {error}\n'
+        f'请查看日志: {os.path.join(_BASE, "app.log")}'
+    )
+    show_error_dialog('桌面窗口启动失败', message)
 
 
 from server import app, socketio, PORT
@@ -304,37 +550,23 @@ def wait_for_server_http(timeout=15):
     return False
 
 
-def check_webview2():
-    """检查 Windows 系统是否安装了 WebView2 运行库"""
-    if sys.platform != 'win32':
-        return True
-    import winreg
-    try:
-        reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")
-        if winreg.QueryValueEx(reg_key, "pv")[0]:
-            return True
-    except Exception:
-        pass
-    try:
-        reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}")
-        if winreg.QueryValueEx(reg_key, "pv")[0]:
-            return True
-    except Exception:
-        pass
-    return False
-
 def open_desktop():
-    """尝试用 pywebview 打开桌面窗口，失败则回退到浏览器"""
-    if sys.platform == 'win32' and not check_webview2():
-        print('[提示] 未检测到 WebView2 运行库，降级使用 Chrome App 模式')
-        return open_chrome_app()
+    """仅使用 pywebview 打开桌面窗口，不回退浏览器。"""
+    if sys.platform == 'win32' and not ensure_webview2_runtime():
+        notify_missing_webview2()
+        return False
 
     configure_webview()
     try:
         import webview
-    except ImportError:
+    except ImportError as e:
+        append_app_log(f'pywebview import failed: {e}')
+        missing_modules = ['pywebview']
         if sys.platform == 'win32':
-            return open_chrome_app()
+            missing_modules.append('pythonnet')
+        elif sys.platform == 'darwin':
+            missing_modules.extend(['pyobjc-core', 'pyobjc-framework-Cocoa', 'pyobjc-framework-WebKit'])
+        notify_missing_desktop_runtime(missing_modules)
         return False
 
     try:
@@ -361,15 +593,19 @@ def open_desktop():
     }
 
     icon_path = get_icon_path()
-    if icon_path:
+    if sys.platform == 'win32' and icon_path:
         window_params['icon'] = icon_path
 
     try:
-        # 在 Windows 上强制指定使用 edgechromium (WebView2) 引擎
-        # 如果系统没有安装 WebView2，webview.create_window / webview.start 就会抛出 WebViewException
         gui = 'edgechromium' if sys.platform == 'win32' else None
-        
-        _window = webview.create_window(**window_params)
+        try:
+            _window = webview.create_window(**window_params)
+        except TypeError as e:
+            if 'icon' not in str(e) or 'unexpected keyword argument' not in str(e):
+                raise
+            append_app_log(f'当前 pywebview 不支持 icon 参数，已自动降级重试: {e}')
+            window_params.pop('icon', None)
+            _window = webview.create_window(**window_params)
         # 系统暗色模式下自动适配标题栏
         try:
             _apply_system_titlebar(window_params['title'])
@@ -401,9 +637,8 @@ def open_desktop():
         return True
     except Exception as e:
         print(f'[错误] 桌面窗口启动失败: {e}')
-        print('[提示] 将回退到 Chrome App 模式')
+        append_app_log(f'桌面窗口启动失败: {e}')
         try:
-            from datetime import datetime
             import traceback
             log_path = os.path.join(_BASE, 'app.log')
             with open(log_path, 'a', encoding='utf-8') as f:
@@ -412,8 +647,10 @@ def open_desktop():
                 f.write('\n')
         except Exception:
             pass
-        if sys.platform == 'win32':
-            return open_chrome_app()
+        if sys.platform == 'win32' and not has_webview2_runtime():
+            notify_missing_webview2()
+        else:
+            notify_desktop_launch_failure(e)
         return False
 
 
@@ -423,30 +660,21 @@ def main():
     print('=' * 50)
     print()
 
-    server_thread = start_server()
+    start_server()
     _server_ready.wait(timeout=10)
     wait_for_server_http(timeout=15)
 
     # 尝试 pywebview 桌面窗口
     desktop_started = open_desktop()
     if not desktop_started:
-        print('[提示] 桌面窗口启动失败，回退为浏览器打开')
-        print(f'[启动] 打开 http://localhost:{PORT}')
-        webbrowser.open(f'http://localhost:{PORT}')
-    else:
-        # pywebview.start 在窗口关闭后才返回；此时直接结束主进程，
-        # 不再继续等待后台 SocketIO 线程，避免点 X 后进程卡死。
-        print('[关闭] 桌面窗口已关闭')
+        message = '桌面窗口未能启动，程序已终止；本次不会回退到浏览器模式。'
+        print(f'[错误] {message}')
+        append_app_log(message)
         return
-
-    # 保持主进程存活
-    try:
-        while server_thread.is_alive():
-            server_thread.join(1)
-    except KeyboardInterrupt:
-        print('\n[关闭] 正在退出...')
-
-    print('[关闭] 再见')
+    # pywebview.start 在窗口关闭后才返回；此时直接结束主进程，
+    # 不再继续等待后台 SocketIO 线程，避免点 X 后进程卡死。
+    print('[关闭] 桌面窗口已关闭')
+    return
 
 
 if __name__ == '__main__':

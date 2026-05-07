@@ -205,13 +205,12 @@
               <div class="drop-hint">MP4 &middot; 可批量选择 &middot; 最大 20GB</div>
               <input type="file" accept="video/mp4,video/*" class="drop-input" id="videoInput" multiple aria-label="选择视频文件" />
               <div class="drop-preview" id="videoPreview">
+                <button class="delete-btn" title="删除素材" type="button">&times;</button>
                 <video controls></video>
                 <span class="drop-filename"></span>
               </div>
+              <div class="batch-video-strip" id="batchVideoStrip" style="display: none"></div>
             </div>
-
-            <!-- Batch video strip -->
-            <div class="batch-video-strip" id="batchVideoStrip" style="display: none"></div>
 
             <div class="drop-zone drop-zone-sm" id="coverDrop" style="margin-bottom: 0">
               <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -223,6 +222,7 @@
               <div class="drop-hint">PNG / JPG</div>
               <input type="file" accept="image/png,image/jpeg,image/*" class="drop-input" id="coverInput" aria-label="选择封面图片" />
               <div class="drop-preview" id="coverPreview">
+                <button class="delete-btn" title="删除素材" type="button">&times;</button>
                 <img alt="cover preview" />
                 <span class="drop-filename"></span>
               </div>
