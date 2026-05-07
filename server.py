@@ -46,6 +46,7 @@ from batch_upload import (
     detect_login_state,
     upload_headless_from_env,
     info_should_show_in_live_ui,
+    set_ui_event_handler,
     logger as batch_logger,
     LOG_PATH,
     RESULTS_PATH,
@@ -94,6 +95,14 @@ def broadcast(msg):
         pass
 
 
+def _forward_ui_event(event):
+    if not isinstance(event, dict):
+        return
+    payload = dict(event)
+    payload.setdefault('ts', datetime.now(timezone.utc).isoformat())
+    broadcast(payload)
+
+
 # Override logger to broadcast via WebSocket
 _orig_info = batch_logger.info
 _orig_warn = batch_logger.warn
@@ -136,6 +145,7 @@ def _broadcast_error(msg):
 batch_logger.info = _broadcast_info
 batch_logger.warn = _broadcast_warn
 batch_logger.error = _broadcast_error
+set_ui_event_handler(_forward_ui_event)
 
 logger = batch_logger
 

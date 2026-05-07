@@ -68,6 +68,17 @@ def get_ms_playwright_dir():
     return ''
 
 
+def get_playwright_browsers_path_for_install():
+    env_dir = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '').strip()
+    if env_dir and env_dir != '0':
+        return env_dir
+    if sys.platform == 'win32':
+        return os.path.join(os.environ.get('LOCALAPPDATA', ''), 'ms-playwright')
+    if sys.platform == 'darwin':
+        return os.path.expanduser('~/Library/Caches/ms-playwright')
+    return os.path.expanduser('~/.cache/ms-playwright')
+
+
 def find_chromium_version():
     """Find the Playwright Chromium revision from browsers.json."""
     try:
@@ -96,6 +107,86 @@ def find_chromium_version():
             versions.sort(key=lambda p: int(os.path.basename(p).split('-')[1]))
             return os.path.basename(versions[-1]).split('-')[1]
     return None
+
+
+def _has_playwright_browser(ms_pw_dir, browser_name, revision=None):
+    if not ms_pw_dir or not os.path.isdir(ms_pw_dir):
+        return False
+    if revision:
+        return os.path.isdir(os.path.join(ms_pw_dir, f'{browser_name}-{revision}'))
+    try:
+        for d in os.listdir(ms_pw_dir):
+            if d.startswith(f'{browser_name}-') and os.path.isdir(os.path.join(ms_pw_dir, d)):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _run_playwright_install(args, env):
+    cmd = [sys.executable, '-m', 'playwright', 'install'] + args
+    log(f'[INFO] Running: {" ".join(cmd)}')
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800)
+    except FileNotFoundError:
+        raise SystemExit('[ERROR] Python executable not found when running playwright install')
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            '[ERROR] playwright install 超时（30 分钟）。\n'
+            '[HINT] 请检查网络后重试，或在构建机先手动执行: python -m playwright install chromium chromium-headless-shell'
+        )
+    if result.returncode == 0:
+        return
+    tail = ''
+    if result.stderr:
+        tail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else ''
+    elif result.stdout:
+        tail = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ''
+    raise SystemExit(
+        '[ERROR] 自动安装 Playwright 浏览器失败，已中止打包。\n'
+        f'[DETAIL] {" ".join(cmd)} -> exit {result.returncode}'
+        + (f' | {tail}' if tail else '') +
+        '\n[HINT] 可先手动执行: python -m playwright install chromium chromium-headless-shell'
+    )
+
+
+def ensure_playwright_browsers_ready():
+    chromium_ver = find_chromium_version()
+    install_path = get_playwright_browsers_path_for_install()
+    env = dict(os.environ)
+    env['PLAYWRIGHT_BROWSERS_PATH'] = install_path
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = install_path
+    os.makedirs(install_path, exist_ok=True)
+
+    ms_pw = get_ms_playwright_dir() or install_path
+    has_chromium = _has_playwright_browser(ms_pw, 'chromium', chromium_ver)
+    has_shell = _has_playwright_browser(ms_pw, 'chromium_headless_shell', chromium_ver)
+    missing_targets = []
+    if not has_chromium:
+        missing_targets.append('chromium')
+    if not has_shell:
+        missing_targets.append('chromium-headless-shell')
+
+    if missing_targets:
+        log(f'[INFO] Playwright browsers missing before build: {", ".join(missing_targets)}')
+        _run_playwright_install(missing_targets, env)
+        chromium_ver = find_chromium_version()
+        ms_pw = get_ms_playwright_dir() or install_path
+        has_chromium = _has_playwright_browser(ms_pw, 'chromium', chromium_ver)
+        has_shell = _has_playwright_browser(ms_pw, 'chromium_headless_shell', chromium_ver)
+
+    if not has_chromium or not has_shell:
+        raise SystemExit(
+            '[ERROR] Playwright 浏览器未补齐，已中止打包。\n'
+            f'[DETAIL] chromium={has_chromium}, headless_shell={has_shell}, path={ms_pw}\n'
+            '[HINT] 先执行: python -m playwright install chromium chromium-headless-shell'
+        )
+
+    if chromium_ver:
+        log(f'[INFO] Playwright Chromium revision ready: {chromium_ver}')
+    else:
+        log('[INFO] Playwright Chromium is ready')
+    return chromium_ver
 
 
 def clean(base):
@@ -438,9 +529,7 @@ def build():
     ensure_windows_desktop_runtime()
     ensure_macos_desktop_runtime()
 
-    chromium_ver = find_chromium_version()
-    if chromium_ver:
-        log(f'[INFO] Chromium revision: {chromium_ver}')
+    chromium_ver = ensure_playwright_browsers_ready()
 
     try:
         __import__('PyInstaller')

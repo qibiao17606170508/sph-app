@@ -70,6 +70,18 @@ function hideLoadingOverlay() {
   $("loadingOverlay").style.display = "none";
 }
 
+function handleBlockingLoadingEvent(d) {
+  if (!d || d.type !== "blocking-loading") return;
+  const action = String(d.action || "").toLowerCase();
+  if (action === "show" || action === "update") {
+    showLoadingOverlay(d.title || "安装中…", d.text || "正在安装插件，请稍候");
+    return;
+  }
+  if (action === "hide") {
+    hideLoadingOverlay();
+  }
+}
+
 function loadRememberedLogin() {
   try {
     const raw = localStorage.getItem(REMEMBER_LOGIN_KEY);
@@ -457,6 +469,7 @@ function connectWS() {
   if (!authUser || socket) return;
   socket = io({ transports: ["websocket"] });
   socket.on("message", (d) => {
+    if (d.type === "blocking-loading") handleBlockingLoadingEvent(d);
     if (d.type === "log") appendLog(d);
     if (d.type === "progress") onProgress(d);
     if (d.type === "upload-end") onUploadEnd(d);

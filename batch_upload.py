@@ -34,6 +34,7 @@ __all__ = [
     'probe_video', 'logger', 'notify_user',
     'upload_headless_from_env',
     'info_should_show_in_live_ui',
+    'set_ui_event_handler',
 ]
 
 # ── Constants ──
@@ -45,6 +46,8 @@ RESULTS_PATH = os.path.join(_BASE_DIR, 'results.csv')
 MAX_RETRIES = 2
 # Playwright 硬限制：buffer 型 FilePayload 不得超过约 50MB（再大须走路径或 FileChooser）
 _PLAYWRIGHT_FILE_PAYLOAD_MAX = 50 * 1024 * 1024
+_WINDOWS_PLAYWRIGHT_INSTALL_ATTEMPTED = False
+_UI_EVENT_HANDLER = None
 
 PLATFORM = {
     'maxFileSize': 20 * 1024 * 1024 * 1024,
@@ -125,6 +128,22 @@ def _windows_hidden_subprocess_kwargs():
         startupinfo.dwFlags |= startf_use_show_window
         kwargs['startupinfo'] = startupinfo
     return kwargs
+
+
+def set_ui_event_handler(handler):
+    """Register UI event callback from server layer."""
+    global _UI_EVENT_HANDLER
+    _UI_EVENT_HANDLER = handler
+
+
+def _emit_ui_event(event):
+    cb = _UI_EVENT_HANDLER
+    if cb is None:
+        return
+    try:
+        cb(event)
+    except Exception:
+        pass
 
 
 # ── Desktop notification ──
@@ -504,6 +523,191 @@ def _headless_ignore_default_args():
     return ['--enable-automation']
 
 
+def _resolve_playwright_browsers_path():
+    """Best-effort resolve Playwright browsers directory for dev + frozen builds."""
+    candidates = []
+    env_dir = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '').strip()
+    if env_dir and env_dir != '0':
+        candidates.append(env_dir)
+
+    if getattr(sys, 'frozen', False):
+        meipass = getattr(sys, '_MEIPASS', '')
+        if meipass:
+            candidates.extend([
+                os.path.join(meipass, 'ms-playwright'),
+                os.path.join(os.path.dirname(meipass), 'Resources', 'ms-playwright'),
+            ])
+        exe_dir = os.path.dirname(sys.executable)
+        candidates.extend([
+            os.path.join(exe_dir, '_internal', 'ms-playwright'),
+            os.path.join(exe_dir, 'ms-playwright'),
+        ])
+
+    if sys.platform == 'win32':
+        candidates.append(os.path.join(os.environ.get('LOCALAPPDATA', ''), 'ms-playwright'))
+    elif sys.platform == 'darwin':
+        candidates.append(os.path.expanduser('~/Library/Caches/ms-playwright'))
+    else:
+        candidates.append(os.path.expanduser('~/.cache/ms-playwright'))
+
+    for path in candidates:
+        if path and os.path.isdir(path):
+            return path
+    return ''
+
+
+def _find_playwright_chromium_executable(ms_playwright_dir):
+    """Return chromium executable path from a Playwright browsers dir."""
+    if not ms_playwright_dir or not os.path.isdir(ms_playwright_dir):
+        return ''
+    revisions = []
+    for name in os.listdir(ms_playwright_dir):
+        if not name.startswith('chromium-'):
+            continue
+        full_dir = os.path.join(ms_playwright_dir, name)
+        if not os.path.isdir(full_dir):
+            continue
+        try:
+            rev = int(name.split('-', 1)[1])
+        except Exception:
+            continue
+        revisions.append((rev, full_dir))
+    revisions.sort(key=lambda x: x[0], reverse=True)
+    for _, chromium_dir in revisions:
+        if sys.platform == 'win32':
+            exe = os.path.join(chromium_dir, 'chrome-win', 'chrome.exe')
+        elif sys.platform == 'darwin':
+            exe = os.path.join(chromium_dir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+        else:
+            exe = os.path.join(chromium_dir, 'chrome-linux', 'chrome')
+        if os.path.isfile(exe):
+            return exe
+    return ''
+
+
+def _is_headless_shell_missing_error(exc):
+    msg = str(exc).lower()
+    return ("executable doesn't exist" in msg) and ('chrome-headless-shell' in msg)
+
+
+def _attempt_windows_playwright_install():
+    """Try to self-heal missing Playwright browser binaries on Windows."""
+    global _WINDOWS_PLAYWRIGHT_INSTALL_ATTEMPTED
+    if sys.platform != 'win32':
+        return False
+    if _WINDOWS_PLAYWRIGHT_INSTALL_ATTEMPTED:
+        return False
+    _WINDOWS_PLAYWRIGHT_INSTALL_ATTEMPTED = True
+
+    _emit_ui_event({
+        'type': 'blocking-loading',
+        'action': 'show',
+        'owner': 'plugin-install',
+        'title': '安装插件',
+        'text': '正在安装插件，请勿关闭程序。'
+    })
+    logger.warn('  [Browser] 正在安装插件，请勿关闭程序。')
+    notify_user('视频号上传', '正在安装插件，请勿关闭程序。')
+    commands = [
+        [sys.executable, '-m', 'playwright', 'install', 'chromium'],
+        [sys.executable, '-m', 'playwright', 'install'],
+    ]
+    for cmd in commands:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                **_windows_hidden_subprocess_kwargs(),
+            )
+        except Exception as e:
+            logger.warn(f'  [Browser] Internal install command failed to run: {e}')
+            continue
+
+        install_start = time.time()
+        next_progress_log = install_start + 3
+        timeout_sec = 600
+        while proc.poll() is None:
+            now = time.time()
+            if now >= next_progress_log:
+                logger.warn('  [Browser] 正在安装插件，请勿关闭程序。')
+                _emit_ui_event({
+                    'type': 'blocking-loading',
+                    'action': 'update',
+                    'owner': 'plugin-install',
+                    'title': '安装插件',
+                    'text': '正在安装插件，请勿关闭程序。'
+                })
+                next_progress_log = now + 5
+            if now - install_start >= timeout_sec:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                out_text, err_text = proc.communicate()
+                proc = subprocess.CompletedProcess(
+                    args=cmd, returncode=124, stdout=out_text or '', stderr=err_text or ''
+                )
+                break
+            time.sleep(0.5)
+        else:
+            out_text, err_text = proc.communicate()
+            proc = subprocess.CompletedProcess(
+                args=cmd, returncode=proc.returncode, stdout=out_text or '', stderr=err_text or ''
+            )
+
+        if proc.returncode == 0:
+            logger.warn('  [Browser] 插件安装完成，正在继续。')
+            notify_user('视频号上传', '插件安装完成，正在继续。')
+            _emit_ui_event({
+                'type': 'blocking-loading',
+                'action': 'hide',
+                'owner': 'plugin-install'
+            })
+            logger.warn(f'  [Browser] Internal install succeeded: {" ".join(cmd)}')
+            return True
+
+        tail = ''
+        if proc.stderr:
+            tail = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else ''
+        elif proc.stdout:
+            tail = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ''
+        logger.warn(
+            f'  [Browser] Internal install failed ({proc.returncode}): {" ".join(cmd)}'
+            + (f' | {tail}' if tail else '')
+        )
+    notify_user('视频号上传', '自动安装浏览器插件失败，将尝试备用启动方式。')
+    _emit_ui_event({
+        'type': 'blocking-loading',
+        'action': 'hide',
+        'owner': 'plugin-install'
+    })
+    return False
+
+
+def _windows_visible_fallback_launch_kwargs(profile_dir):
+    args = [
+        '--disable-infobars',
+        '--disable-extensions',
+        '--disable-blink-features=AutomationControlled',
+        '--password-store=basic',
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+        '--start-maximized',
+    ]
+    return {
+        'user_data_dir': profile_dir,
+        'headless': False,
+        'args': args,
+        'no_viewport': True,
+        'viewport': None,
+        'locale': 'zh-CN',
+        'ignore_default_args': ['--enable-automation'],
+        'env': _browser_process_env(profile_dir),
+    }
+
+
 def _browser_process_env(profile_dir: str) -> dict:
     """Provide a writable ASCII-only browser HOME to avoid macOS Crashpad/keychain path issues."""
     env = dict(os.environ)
@@ -608,7 +812,12 @@ def _bind_context_close_with_playwright(context, playwright_driver):
 async def init_browser(profile_dir, headless=True):
     """Launch a persistent Chromium browser context with the given profile."""
     _pw_path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')
-    if _pw_path and os.path.isdir(_pw_path):
+    if sys.platform == 'win32':
+        # 仅 Windows 启用自动探测，避免影响 macOS 既有启动行为。
+        _pw_path = _resolve_playwright_browsers_path()
+        if _pw_path:
+            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = _pw_path
+    elif _pw_path and os.path.isdir(_pw_path):
         os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', _pw_path)
     p = await async_playwright().start()
     # 无头模式只走 Playwright 默认 Chromium，不设置 executable_path，也不做 Chrome 兜底。
@@ -618,6 +827,41 @@ async def init_browser(profile_dir, headless=True):
             context = await p.chromium.launch_persistent_context(**launch_kwargs)
             return _bind_context_close_with_playwright(context, p)
         except Exception as e:
+            if sys.platform == 'win32' and _is_headless_shell_missing_error(e):
+                if _attempt_windows_playwright_install():
+                    _pw_path = _resolve_playwright_browsers_path()
+                    if _pw_path:
+                        os.environ['PLAYWRIGHT_BROWSERS_PATH'] = _pw_path
+                    try:
+                        context = await p.chromium.launch_persistent_context(**launch_kwargs)
+                        logger.warn('  [Browser] Headless launch succeeded after internal install.')
+                        return _bind_context_close_with_playwright(context, p)
+                    except Exception as e_install_retry:
+                        logger.warn(f'  [Browser] Headless retry after internal install failed: {e_install_retry}')
+
+                fallback_exe = _find_playwright_chromium_executable(_pw_path)
+                if fallback_exe:
+                    retry_kwargs = dict(launch_kwargs)
+                    retry_kwargs['executable_path'] = fallback_exe
+                    logger.warn(
+                        f'  [Browser] Headless shell missing, retry with bundled chromium executable: {fallback_exe}'
+                    )
+                    try:
+                        context = await p.chromium.launch_persistent_context(**retry_kwargs)
+                        return _bind_context_close_with_playwright(context, p)
+                    except Exception as e_retry:
+                        logger.warn(f'  [Browser] Headless retry via chromium executable failed: {e_retry}')
+                else:
+                    logger.warn('  [Browser] Headless shell missing and no bundled chromium executable found.')
+
+                # 第二层兜底：仅 Windows，退回有界面模式，避免因 headless-shell 缺失直接失败。
+                visible_retry_kwargs = _windows_visible_fallback_launch_kwargs(profile_dir)
+                logger.warn('  [Browser] Retry launch with visible browser on Windows.')
+                try:
+                    context = await p.chromium.launch_persistent_context(**visible_retry_kwargs)
+                    return _bind_context_close_with_playwright(context, p)
+                except Exception as e_visible:
+                    logger.warn(f'  [Browser] Visible fallback launch failed: {e_visible}')
             logger.warn(f'  [Browser] Headless launch failed via playwright-default: {e}')
             try:
                 await p.stop()
