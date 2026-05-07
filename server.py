@@ -16,6 +16,7 @@ import ssl
 import string
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -570,6 +571,127 @@ def cleanup():
                 nl.close()
 
 
+def _prepare_headless_upload_profile(profile_dir):
+    """macOS 无头上传时复制一份精简 profile，避免直接复用真实目录导致 Chromium 崩溃。"""
+    src = os.path.abspath(profile_dir)
+    temp_root = tempfile.mkdtemp(prefix='wx-headless-profile-')
+    dst = os.path.join(temp_root, 'profile')
+    try:
+        _copy_profile_tree(src, dst)
+        logger.info(f'Headless upload profile prepared: {dst}')
+        return dst, temp_root
+    except Exception:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise
+
+
+def _is_volatile_profile_entry(name):
+    name = str(name or '')
+    if not name:
+        return False
+    volatile_names = {
+        'Cache', 'Code Cache', 'GPUCache', 'ShaderCache', 'GrShaderCache',
+        'GraphiteDawnCache', 'DawnCache', 'Crashpad', 'BrowserMetrics',
+        'SingletonLock', 'SingletonCookie', 'SingletonSocket', 'LOCK', '.lock',
+        'RunningChromeVersion', 'Last Version', 'DevToolsActivePort',
+    }
+    if name in volatile_names:
+        return True
+    if name.endswith('.lock'):
+        return True
+    if name.startswith('Singleton'):
+        return True
+    if name.startswith('RunningChrome'):
+        return True
+    return False
+
+
+def _profile_copy_ignore(_src, _names):
+    return {n for n in _names if _is_volatile_profile_entry(n)}
+
+
+def _copy_profile_file(src, dst, *, follow_symlinks=True):
+    try:
+        return shutil.copy2(src, dst, follow_symlinks=follow_symlinks)
+    except FileNotFoundError:
+        logger.warn(f'Profile copy skipped vanished file: {src}')
+        return dst
+
+
+def _copy_profile_tree(src, dst):
+    shutil.copytree(
+        src,
+        dst,
+        dirs_exist_ok=True,
+        ignore=_profile_copy_ignore,
+        copy_function=_copy_profile_file,
+    )
+
+
+
+
+def _prepare_visible_browser_profile(profile_dir):
+    """Create a temporary visible-browser profile copy and sync it back on close."""
+    src = os.path.abspath(profile_dir)
+    temp_root = tempfile.mkdtemp(prefix='wx-visible-profile-')
+    dst = os.path.join(temp_root, 'profile')
+    try:
+        _copy_profile_tree(src, dst)
+        logger.info(f'Visible browser profile prepared: {dst}')
+        return dst, temp_root
+    except Exception:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise
+
+def _sync_profile_back(temp_profile_dir, target_profile_dir):
+    """Merge login/session data from temporary profile back to the real profile."""
+    if not temp_profile_dir or not target_profile_dir:
+        return
+    src = os.path.abspath(temp_profile_dir)
+    dst = os.path.abspath(target_profile_dir)
+    os.makedirs(dst, exist_ok=True)
+    _copy_profile_tree(src, dst)
+
+
+def _cleanup_temp_profile(ctx, persist_back=False):
+    """Cleanup per-context temp profile; optionally sync it back first."""
+    if ctx is None:
+        return
+    temp_root = getattr(ctx, '_wx_temp_profile_root', None)
+    temp_profile_dir = getattr(ctx, '_wx_temp_profile_dir', None)
+    target_profile_dir = getattr(ctx, '_wx_origin_profile_dir', None)
+    if persist_back and temp_profile_dir and target_profile_dir:
+        try:
+            _sync_profile_back(temp_profile_dir, target_profile_dir)
+            logger.info(f'Profile synced back to: {target_profile_dir}')
+        except Exception as e:
+            logger.warn(f'Profile sync-back failed: {e}')
+    if temp_root:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def _kill_mac_browser_processes_for_profile(profile_dir):
+    """Best-effort cleanup for macOS browser processes still holding this profile."""
+    if sys.platform != 'darwin':
+        return
+    abs_profile_dir = os.path.abspath(profile_dir)
+    escaped = re.escape(abs_profile_dir)
+    patterns = [
+        rf'Chromium.*--user-data-dir[= ]{escaped}',
+        rf'Google Chrome.*--user-data-dir[= ]{escaped}',
+        rf'chrome.*--user-data-dir[= ]{escaped}',
+    ]
+    for pattern in patterns:
+        try:
+            subprocess.run(
+                ['pkill', '-f', pattern],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+
 # ══════════════════════════════════════════════
 # API Routes
 # ══════════════════════════════════════════════
@@ -689,14 +811,27 @@ def api_open_browser(name):
 
 async def _open_browser_async(name, acct):
     await unlock_profile(acct['profileDir'])
+    _kill_mac_browser_processes_for_profile(acct['profileDir'])
+    logger.info(f'Open browser: launching visible browser for {acct["label"]}')
+    launch_profile_dir = acct['profileDir']
+    temp_profile_root = None
+    if sys.platform == 'darwin':
+        launch_profile_dir, temp_profile_root = _prepare_visible_browser_profile(acct['profileDir'])
 
-    ctx = await init_browser(acct['profileDir'], headless=False)
+    ctx = await init_browser(launch_profile_dir, headless=False)
+    if temp_profile_root:
+        ctx._wx_temp_profile_root = temp_profile_root
+        ctx._wx_temp_profile_dir = launch_profile_dir
+        ctx._wx_origin_profile_dir = acct['profileDir']
 
     if len(ctx.pages) == 0:
         await ctx.close()
+        _cleanup_temp_profile(ctx, persist_back=True)
         return
 
     active_contexts[name] = ctx
+    with _browser_loop_lock:
+        _browser_loops[name] = asyncio.get_running_loop()
     page = ctx.pages[0]
 
     try:
@@ -713,8 +848,12 @@ async def _open_browser_async(name, acct):
             await ctx.close()
         except Exception:
             pass
+        _cleanup_temp_profile(ctx, persist_back=True)
         if active_contexts.get(name) is ctx:
             active_contexts.pop(name, None)
+        with _browser_loop_lock:
+            if _browser_loops.get(name) is asyncio.get_running_loop():
+                _browser_loops.pop(name, None)
 
 
 @app.route('/api/accounts/<name>/login', methods=['POST'])
@@ -753,15 +892,28 @@ def api_login(name):
 async def _login_async(name, acct):
     """Launch browser, wait for QR scan completion, then close."""
     await unlock_profile(acct['profileDir'])
+    _kill_mac_browser_processes_for_profile(acct['profileDir'])
+    logger.info(f'Login browser: launching visible browser for {acct["label"]}')
+    launch_profile_dir = acct['profileDir']
+    temp_profile_root = None
+    if sys.platform == 'darwin':
+        launch_profile_dir, temp_profile_root = _prepare_visible_browser_profile(acct['profileDir'])
 
-    ctx = await init_browser(acct['profileDir'], headless=False)
+    ctx = await init_browser(launch_profile_dir, headless=False)
+    if temp_profile_root:
+        ctx._wx_temp_profile_root = temp_profile_root
+        ctx._wx_temp_profile_dir = launch_profile_dir
+        ctx._wx_origin_profile_dir = acct['profileDir']
 
     if len(ctx.pages) == 0:
         await ctx.close()
+        _cleanup_temp_profile(ctx, persist_back=True)
         logger.error(f'Login browser failed to start for {acct["label"]}')
         return
 
     active_contexts[name] = ctx
+    with _browser_loop_lock:
+        _browser_loops[name] = asyncio.get_running_loop()
     page = ctx.pages[0]
 
     try:
@@ -851,8 +1003,12 @@ async def _login_async(name, acct):
             await ctx.close()
         except Exception:
             pass
+        _cleanup_temp_profile(ctx, persist_back=True)
         if active_contexts.get(name) is ctx:
             active_contexts.pop(name, None)
+        with _browser_loop_lock:
+            if _browser_loops.get(name) is asyncio.get_running_loop():
+                _browser_loops.pop(name, None)
 
 
 # ── Verify login status ──
@@ -868,9 +1024,15 @@ async def _check_account_login_state(page):
 
     for probe_url in probe_urls:
         try:
+            logger.info(f'verify: navigating to {probe_url} ...')
             await page.goto(probe_url, wait_until='domcontentloaded', timeout=20000)
+            logger.info(f'verify: reached {probe_url}, current url: {page.url}')
         except Exception as e:
-            logger.warn(f'verify: goto {probe_url} failed: {e}')
+            err_msg = str(e)
+            logger.warn(f'verify: goto {probe_url} failed: {err_msg}')
+            if 'closed' in err_msg.lower() or 'terminate' in err_msg.lower():
+                last_state = {'logged_in': False, 'reason': 'browser_crash', 'detail': err_msg}
+                break
             continue
 
         for attempt in range(3):
@@ -1020,37 +1182,34 @@ async def _verify_async(name, acct):
     # 强力解锁 Profile (不仅清理文件，还要清理可能残留的进程)
     await unlock_profile(acct['profileDir'])
     if sys.platform == 'darwin':
-        import subprocess
-        try:
-            # 暴力清理同目录的残留 Chromium 进程
-            subprocess.run(['pkill', '-f', 'Chromium.*--user-data-dir.*browser-profiles'], 
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        _kill_mac_browser_processes_for_profile(acct['profileDir'])
 
+    launch_profile_dir = acct['profileDir']
+    temp_profile_root = None
+    
+    # macOS 下即使是验证也建议走临时 profile，避免 Singleton 冲突导致崩溃
+    if sys.platform == 'darwin':
+        try:
+            launch_profile_dir, temp_profile_root = _prepare_headless_upload_profile(acct['profileDir'])
+        except Exception as e:
+            logger.warn(f'verify: prepare temp profile failed: {e}')
+
+    ctx = None
     try:
-        ctx = await init_browser(acct['profileDir'], headless=True)
+        ctx = await init_browser(launch_profile_dir, headless=True)
+        if temp_profile_root:
+            ctx._wx_temp_profile_root = temp_profile_root
+            ctx._wx_temp_profile_dir = launch_profile_dir
     except Exception as e:
-        if sys.platform == 'darwin':
-            logger.warn(f'verify: headless launch failed on macOS, retry headed: {e}')
-            try:
-                ctx = await init_browser(acct['profileDir'], headless=False)
-            except Exception as retry_e:
-                logger.error(f'verify: launch browser failed: {retry_e}')
-                return {
-                    'name': name,
-                    'valid': False,
-                    'error': str(retry_e),
-                    'hint': '浏览器进程启动即崩溃。请先关闭残留 Chrome，再重试；若仍失败，请使用新版本安装包。',
-                }
-        else:
-            logger.error(f'verify: launch browser failed: {e}')
-            return {
-                'name': name,
-                'valid': False,
-                'error': str(e),
-                'hint': '请确认没有其它 Chrome/Chromium 正在使用该账号资料目录，或重启应用后再试。',
-            }
+        logger.error(f'verify: launch browser failed: {e}')
+        if temp_profile_root:
+            shutil.rmtree(temp_profile_root, ignore_errors=True)
+        return {
+            'name': name,
+            'valid': False,
+            'error': str(e),
+            'hint': '无头验证启动失败。请先关闭残留浏览器后重试；若要人工查看，请使用「打开浏览器」。',
+        }
     try:
         page = ctx.pages[0] if len(ctx.pages) > 0 else await ctx.new_page()
         login_state = await _check_account_login_state(page)
@@ -1068,9 +1227,13 @@ async def _verify_async(name, acct):
         }
     finally:
         try:
-            await ctx.close()
+            if ctx:
+                await ctx.close()
         except Exception:
             pass
+        if temp_profile_root:
+            shutil.rmtree(temp_profile_root, ignore_errors=True)
+
 
 
 async def _async_close_account_browser(name):
@@ -1085,8 +1248,13 @@ async def _async_close_account_browser(name):
         await ctx.close()
     except Exception:
         pass
+    _cleanup_temp_profile(ctx, persist_back=True)
     if active_contexts.get(name) is ctx:
         active_contexts.pop(name, None)
+    with _browser_loop_lock:
+        loop = _browser_loops.get(name)
+        if loop is asyncio.get_running_loop():
+            _browser_loops.pop(name, None)
     evt = _browser_stop_events.get(name)
     if evt is not None and not evt.is_set():
         evt.set()
@@ -1155,6 +1323,7 @@ async def _upload_session(account_name, csv_content, schedule_interval_min=None)
                 await ctx.close()
             except Exception:
                 pass
+            _cleanup_temp_profile(ctx, persist_back=False)
         if not stop_evt.is_set():
             stop_evt.set()
 
@@ -1207,121 +1376,134 @@ async def _upload_async(account_name, csv_content, schedule_interval_min=None):
             active_contexts.pop(account_name, None)
             ctx = None
 
-    if ctx is None:
-        await unlock_profile(acct['profileDir'])
-        use_headless = upload_headless_from_env()
-        logger.info(
-            f'Upload browser: {"headless" if use_headless else "visible window"} '
-            f'(HEADLESS_UPLOAD=0/false/off 才有界面；未设置则默认无头)'
-        )
-        ctx = await init_browser(acct['profileDir'], headless=use_headless)
-        active_contexts[account_name] = ctx
-
-    if len(ctx.pages) == 0:
-        logger.error(
-            'Browser launched but no page created — '
-            'profile may be locked or Chrome crashed'
-        )
-        broadcast({
-            'type': 'upload-end',
-            'success': False,
-            'error': '浏览器启动失败，请检查是否有其他 Chrome 实例占用同一账号，或重启电脑后重试',
-        })
-        return
-
-    # Parse CSV
+    upload_profile_dir = acct['profileDir']
+    upload_profile_temp_root = None
     try:
-        records = load_csv_from_string(csv_content)
-    except Exception as e:
-        logger.error(f'CSV parse error: {e}')
-        broadcast({
-            'type': 'upload-end',
-            'success': False,
-            'error': str(e),
-        })
-        return
+        if ctx is None:
+            await unlock_profile(acct['profileDir'])
+            use_headless = upload_headless_from_env()
+            logger.info(
+                f'Upload browser: {"headless" if use_headless else "visible window"} '
+                f'(HEADLESS_UPLOAD=0/false/off 才有界面；未设置则默认无头)'
+            )
+            if use_headless and sys.platform == 'darwin':
+                upload_profile_dir, upload_profile_temp_root = _prepare_headless_upload_profile(
+                    acct['profileDir']
+                )
+            ctx = await init_browser(upload_profile_dir, headless=use_headless)
+            if upload_profile_temp_root:
+                ctx._wx_temp_profile_root = upload_profile_temp_root
+                ctx._wx_temp_profile_dir = upload_profile_dir
+            active_contexts[account_name] = ctx
 
-    try:
-        gi = (
-            int(schedule_interval_min)
-            if schedule_interval_min is not None
-            else int(os.environ.get('SCHEDULE_INTERVAL_MIN', '1') or '1')
-        )
-    except (TypeError, ValueError):
-        gi = 1
-    if gi < 1:
-        gi = 1
-    if gi > 1440:
-        gi = 1440
-    for r in records:
+        if len(ctx.pages) == 0:
+            logger.error(
+                'Browser launched but no page created — '
+                'profile may be locked or Chrome crashed'
+            )
+            broadcast({
+                'type': 'upload-end',
+                'success': False,
+                'error': '浏览器启动失败，请检查是否有其他 Chrome 实例占用同一账号，或重启电脑后重试',
+            })
+            return
+
+        # Parse CSV
         try:
-            ex = int(r.get('schedule_interval_min', 0) or 0)
-        except (TypeError, ValueError):
-            ex = 0
-        if ex <= 0:
-            r['schedule_interval_min'] = gi
+            records = load_csv_from_string(csv_content)
+        except Exception as e:
+            logger.error(f'CSV parse error: {e}')
+            broadcast({
+                'type': 'upload-end',
+                'success': False,
+                'error': str(e),
+            })
+            return
 
-    records = preflight_records(records)
-    valid_count = len([r for r in records if not r.get('_skip')])
-    if valid_count == 0:
-        logger.warn('No valid records')
+        try:
+            gi = (
+                int(schedule_interval_min)
+                if schedule_interval_min is not None
+                else int(os.environ.get('SCHEDULE_INTERVAL_MIN', '1') or '1')
+            )
+        except (TypeError, ValueError):
+            gi = 1
+        if gi < 1:
+            gi = 1
+        if gi > 1440:
+            gi = 1440
+        for r in records:
+            try:
+                ex = int(r.get('schedule_interval_min', 0) or 0)
+            except (TypeError, ValueError):
+                ex = 0
+            if ex <= 0:
+                r['schedule_interval_min'] = gi
+
+        records = preflight_records(records)
+        valid_count = len([r for r in records if not r.get('_skip')])
+        if valid_count == 0:
+            logger.warn('No valid records')
+            broadcast({
+                'type': 'upload-end',
+                'success': False,
+                'error': 'No valid records',
+            })
+            return
+
+        logger.info(
+            f'Preflight: {valid_count} valid, {len(records) - valid_count} skipped')
+
+        def on_progress(p):
+            broadcast({
+                'type': 'progress',
+                'current': p['current'],
+                'total': p['total'],
+                'status': p['status'],
+                'title': p['title'],
+            })
+
+        def on_login_expired(record):
+            updateAccountStatus(account_name, 'needs-login')
+            broadcast({
+                'type': 'login-expired',
+                'account': account_name,
+                'title': record.get('title', ''),
+            })
+
+        results = await batch_upload(ctx, records, {
+            'resume': False,
+            'abortSignal': upload_state,
+            'onProgress': on_progress,
+            'onLoginExpired': on_login_expired,
+        })
+
+        login_expired = any(r.get('_loginExpired') for r in results)
+        published_count = len([r for r in results if r.get('status') == 'published'])
         broadcast({
             'type': 'upload-end',
-            'success': False,
-            'error': 'No valid records',
+            'success': True,
+            'results': published_count,
+            'total': len(results),
+            'loginExpired': login_expired,
         })
-        return
+        logger.info(f'Upload complete: {published_count}/{len(results)}')
 
-    logger.info(
-        f'Preflight: {valid_count} valid, {len(records) - valid_count} skipped')
-
-    def on_progress(p):
-        broadcast({
-            'type': 'progress',
-            'current': p['current'],
-            'total': p['total'],
-            'status': p['status'],
-            'title': p['title'],
-        })
-
-    def on_login_expired(record):
-        updateAccountStatus(account_name, 'needs-login')
-        broadcast({
-            'type': 'login-expired',
-            'account': account_name,
-            'title': record.get('title', ''),
-        })
-
-    results = await batch_upload(ctx, records, {
-        'resume': False,
-        'abortSignal': upload_state,
-        'onProgress': on_progress,
-        'onLoginExpired': on_login_expired,
-    })
-
-    login_expired = any(r.get('_loginExpired') for r in results)
-    published_count = len([r for r in results if r.get('status') == 'published'])
-    broadcast({
-        'type': 'upload-end',
-        'success': True,
-        'results': published_count,
-        'total': len(results),
-        'loginExpired': login_expired,
-    })
-    logger.info(f'Upload complete: {published_count}/{len(results)}')
-
-    # Cleanup old temp files (>36 hours), keep recent ones for "恢复上次"
-    try:
-        now_ms = time.time() * 1000
-        for f in os.listdir(UPLOADS_DIR):
-            fp = os.path.join(UPLOADS_DIR, f)
-            try:
-                if now_ms - os.path.getmtime(fp) > 36 * 3600000:
-                    os.unlink(fp)
-            except Exception:
-                pass
-    except Exception:
-        pass
+        # Cleanup old temp files (>36 hours), keep recent ones for "恢复上次"
+        try:
+            now_ms = time.time() * 1000
+            for f in os.listdir(UPLOADS_DIR):
+                fp = os.path.join(UPLOADS_DIR, f)
+                try:
+                    if now_ms - os.path.getmtime(fp) > 36 * 3600000:
+                        os.unlink(fp)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    finally:
+        if upload_profile_temp_root and ctx is None:
+            shutil.rmtree(upload_profile_temp_root, ignore_errors=True)
 
 
 @app.route('/api/upload/start', methods=['POST'])

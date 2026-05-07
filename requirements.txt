@@ -1,7 +1,7 @@
 flask>=3.0
 flask-socketio>=5.3
 python-socketio>=5.11
-playwright>=1.40
+playwright>=1.59.0
 pywebview>=4.0,<6.0
 pythonnet>=3.0; sys_platform == "win32"
 pyobjc-core>=10.0; sys_platform == "darwin"

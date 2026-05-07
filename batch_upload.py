@@ -7,6 +7,7 @@ Translated from batch-upload.js
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import os
@@ -490,79 +491,57 @@ async def detect_login_state(page):
 
 
 def upload_headless_from_env():
-    """批量上传是否用无头 Chromium。默认有界面；仅 HEADLESS_UPLOAD=1/true/yes/on 才无头。"""
+    """批量上传是否用无头 Chromium。默认无头；HEADLESS_UPLOAD=0/false/no/off 可切到有界面。"""
     raw = os.environ.get('HEADLESS_UPLOAD', '').strip().lower()
     if not raw:
-        return False
-    if raw in ('1', 'true', 'yes', 'on'):
         return True
-    return False
+    if raw in ('0', 'false', 'no', 'off'):
+        return False
+    return True
 
 
-def _find_chromium_executable(headless=False):
-    """Find the best Chromium executable to use.
-    Priority:
-    1. System Google Chrome (most stable, users already have it for UI)
-    2. Bundled Playwright Chromium (fallback)
-    """
-    # 1. Check system Google Chrome
-    candidates = []
-    if sys.platform == 'win32':
-        for env_name in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'):
-            root = os.environ.get(env_name, '').strip()
-            if root:
-                candidates.append(os.path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'))
-    elif sys.platform == 'darwin':
-        candidates += [
-            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-            os.path.expanduser('~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
-        ]
-    else:
-        candidates.append(shutil_which('google-chrome'))
-        candidates.append(shutil_which('chrome'))
-        
-    for path in candidates:
-        if path and os.path.isfile(path):
-            # Windows 下检查是否有执行权限，避免 spawn EPERM
-            if sys.platform == 'win32':
-                try:
-                    # 尝试用 os.access 检查 X_OK
-                    if not os.access(path, os.X_OK):
-                        continue
-                except Exception:
-                    pass
-            logger.info(f"  [Browser] Found system Chrome: {path}")
-            return path
-            
-    # 2. Check bundled Playwright Chromium
-    pw_path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')
-    if pw_path and os.path.isdir(pw_path):
-        import glob
-        if headless and sys.platform == 'win32':
-            dirs = glob.glob(os.path.join(pw_path, 'chromium_headless_shell-*'))
-            if dirs:
-                dirs.sort()
-                exe = os.path.join(dirs[-1], 'chrome-headless-shell-win64', 'chrome-headless-shell.exe')
-                if os.path.isfile(exe):
-                    logger.info(f"  [Browser] Found bundled headless shell: {exe}")
-                    return exe
-                    
-        dirs = glob.glob(os.path.join(pw_path, 'chromium-*'))
-        if dirs:
-            dirs.sort()
-            latest = dirs[-1]
-            if sys.platform == 'win32':
-                exe = os.path.join(latest, 'chrome-win', 'chrome.exe')
-            elif sys.platform == 'darwin':
-                exe = os.path.join(latest, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
-            else:
-                exe = os.path.join(latest, 'chrome-linux', 'chrome')
-                
-            if os.path.isfile(exe):
-                logger.info(f"  [Browser] Found bundled Chromium: {exe}")
-                return exe
-                
-    return None
+def _headless_ignore_default_args():
+    return ['--enable-automation']
+
+
+def _browser_process_env(profile_dir: str) -> dict:
+    """Provide a writable ASCII-only browser HOME to avoid macOS Crashpad/keychain path issues."""
+    env = dict(os.environ)
+    profile_key = hashlib.sha1(os.path.abspath(profile_dir or _BASE_DIR).encode('utf-8')).hexdigest()[:12]
+    browser_home = os.path.join(tempfile.gettempdir(), f'wx-pw-home-{profile_key}')
+    crashpad_dir = os.path.join(browser_home, 'Library', 'Application Support', 'Chromium', 'Crashpad')
+    try:
+        os.makedirs(crashpad_dir, exist_ok=True)
+    except OSError:
+        pass
+    env['HOME'] = browser_home
+    return env
+
+
+def _headless_launch_kwargs(profile_dir):
+    # 使用真实的 macOS Chrome User Agent，避免 HeadlessChrome 标识
+    user_agent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    args = [
+        '--disable-crash-reporter',
+        '--disable-crashpad-for-testing',
+        '--password-store=basic',
+        '--use-mock-keychain',
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+    ]
+    
+    return {
+        'user_data_dir': profile_dir,
+        'headless': True,
+        'args': args,
+        'user_agent': user_agent,
+        'viewport': {'width': 1440, 'height': 900},
+        'locale': 'zh-CN',
+        'ignore_default_args': _headless_ignore_default_args(),
+        'env': _browser_process_env(profile_dir),
+    }
 
 
 # ── Browser helpers ──
@@ -604,9 +583,26 @@ async def init_browser(profile_dir, headless=True):
     if _pw_path and os.path.isdir(_pw_path):
         os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', _pw_path)
     p = await async_playwright().start()
+    # 无头模式只走 Playwright 默认 Chromium，不设置 executable_path，也不做 Chrome 兜底。
+    if headless:
+        launch_kwargs = _headless_launch_kwargs(profile_dir)
+        try:
+            context = await p.chromium.launch_persistent_context(**launch_kwargs)
+            return _bind_context_close_with_playwright(context, p)
+        except Exception as e:
+            logger.warn(f'  [Browser] Headless launch failed via playwright-default: {e}')
+            try:
+                await p.stop()
+            except Exception:
+                pass
+            raise
+
     args = [
         '--disable-infobars',
         '--disable-extensions',
+        '--password-store=basic',
+        '--use-mock-keychain',
+        '--disable-blink-features=AutomationControlled',
     ]
     
     # 针对 Linux 和 Windows 的特定优化
@@ -638,24 +634,20 @@ async def init_browser(profile_dir, headless=True):
     if not headless:
         args += ['--start-maximized']
         
+    ignore_default_args = ['--enable-automation']
+
     launch_kwargs = {
         'user_data_dir': profile_dir,
-        'headless': headless,
+        'headless': False,
         'args': args,
-        # 禁用 Playwright 视口模拟，按真实浏览器窗口宽度渲染页面
+        # 有界面模式按真实窗口渲染；无头模式回到历史稳定值
         'no_viewport': True,
+        'viewport': None,
         'locale': 'zh-CN',
-        'ignore_default_args': ['--enable-automation'],
+        'ignore_default_args': ignore_default_args,
+        'env': _browser_process_env(profile_dir),
     }
     
-    exe_path = _find_chromium_executable(headless)
-    if exe_path:
-        launch_kwargs['executable_path'] = exe_path
-    else:
-        # 本地 macOS 开发时优先使用系统 Chrome，避免 Playwright 自带 Chromium 在本机直接崩溃
-        if sys.platform == 'darwin' and not getattr(sys, 'frozen', False):
-            launch_kwargs['channel'] = 'chrome'
-
     try:
         context = await p.chromium.launch_persistent_context(**launch_kwargs)
         return _bind_context_close_with_playwright(context, p)
@@ -676,25 +668,6 @@ async def init_browser(profile_dir, headless=True):
                 err_msg = str(e_retry)
                 e = e_retry
 
-        if 'EPERM' in err_msg or 'Access is denied' in err_msg or 'permission denied' in err_msg:
-            logger.warn(f"  [Browser] Launch failed with permission error: {e}. Trying fallback...")
-            # 如果是因为系统 Chrome 权限问题，尝试清除 executable_path 让 Playwright 用自带的
-            if 'executable_path' in launch_kwargs:
-                launch_kwargs.pop('executable_path')
-                # 尝试用自带的 chromium channel
-                if sys.platform == 'darwin':
-                    launch_kwargs['channel'] = 'chromium'
-                try:
-                    context = await p.chromium.launch_persistent_context(**launch_kwargs)
-                    logger.info("  [Browser] Fallback launch successful.")
-                    return _bind_context_close_with_playwright(context, p)
-                except Exception as e2:
-                    logger.error(f"  [Browser] Fallback launch also failed: {e2}")
-                    try:
-                        await p.stop()
-                    except Exception:
-                        pass
-                    raise e2
         try:
             await p.stop()
         except Exception:
@@ -1469,14 +1442,14 @@ async def wait_for_upload_with_progress(page, abort_signal, video_path=None, rec
             )
             return 'stuck_progress'
 
-        # 每 10 秒报一次详细状态（含网络字节）
-        if now - last_diag_log >= 10:
+        # 每 1 秒报一次详细状态（含网络字节）
+        if now - last_diag_log >= 1:
             last_diag_log = now
             tag = 'Uploading' if upload_started else 'Waiting'
             extra = f' 页面约 {pct}%' if (upload_started and pct is not None) else ''
             logger.info(f'  {tag} {int(elapsed)}s{extra} | {_format_diag(diag)}')
 
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(500)
 
     if upload_started:
         logger.warn(f'  Upload timeout ({max_wait}s)')
@@ -1675,20 +1648,21 @@ async def _prime_upload_zone(page):
             '拖拽', '点击上传', '上传视频', '选择视频',
             'div.post-add-media', '.upload-area', '.media-status-body'
         ]
-        for h in hints:
-            try:
-                if h.startswith('.') or ' ' in h or '>' in h:
-                    loc = page.locator(h).first
-                else:
-                    loc = page.get_by_text(re.compile(h)).first
-                
-                if await loc.count() > 0 and await loc.is_visible():
-                    await loc.click(timeout=2000)
-                    await page.wait_for_timeout(500)
-                    # 只要点中一个有效的就退出
-                    return
-            except Exception:
-                continue
+        for fr in page.frames:
+            for h in hints:
+                try:
+                    if h.startswith('.') or ' ' in h or '>' in h:
+                        loc = fr.locator(h).first
+                    else:
+                        loc = fr.get_by_text(re.compile(h)).first
+                    
+                    if await loc.count() > 0 and await loc.is_visible():
+                        await loc.click(timeout=2000)
+                        await page.wait_for_timeout(500)
+                        # 只要点中一个有效的就退出
+                        return
+                except Exception:
+                    continue
     except Exception:
         pass
 
@@ -1724,15 +1698,30 @@ async def _collect_video_file_inputs(page):
 
 
 async def _wait_for_micro_iframe(page, timeout_ms: int = 12000) -> bool:
-    """等待 micro/content/post/create iframe **里的 file input 真正出现**
-    （视频号发表页的真正承载者；只看 URL 出现还太早，里面 input 没渲染好）。
-    返回 True 表示已出现；False 表示超时（仍继续）。"""
+    """等待发表页相关 frame 里的 file input 真正出现。
+    兼容 /platform/post/create 与 /micro/content/post/create 两种承载路由。"""
     deadline = time.time() + timeout_ms / 1000.0
+    last_log_time = 0
     while time.time() < deadline:
         try:
+            # 任意 frame 有 input[type=file] 即认为就绪
+            ranked = await _collect_video_file_inputs(page)
+            if ranked:
+                logger.info(
+                    f'  已等到发表页 file input：frames={len(page.frames)}, inputs={len(ranked)}'
+                )
+                return True
+            
+            # 定时打印诊断信息
+            now = time.time()
+            if now - last_log_time > 3.0:
+                last_log_time = now
+                current_urls = [f.url for f in page.frames if f.url and 'about:blank' not in f.url]
+                logger.info(f'  [Debug] Waiting for input. Frames: {len(page.frames)}, Non-blank URLs: {current_urls[:3]}...')
+
             for fr in page.frames:
                 u = (getattr(fr, 'url', '') or '').lower()
-                if 'micro/content' not in u:
+                if ('micro/content' not in u) and ('/platform/post/create' not in u):
                     continue
                 try:
                     n = await fr.locator('input[type=file]').count()
@@ -1740,15 +1729,15 @@ async def _wait_for_micro_iframe(page, timeout_ms: int = 12000) -> bool:
                     n = 0
                 if n > 0:
                     logger.info(
-                        f'  已等到 micro iframe 内 file input：'
-                        f'frames={len(page.frames)}, micro_inputs={n}'
+                        f'  已等到发表页 frame 内 file input：'
+                        f'frames={len(page.frames)}, frame_inputs={n}'
                     )
                     return True
         except Exception:
             pass
         await page.wait_for_timeout(300)
     logger.info(
-        f'  micro iframe 内 input 等待超时（{timeout_ms / 1000:.0f}s），基于现有 frame 继续'
+        f'  发表页 input 等待超时（{timeout_ms / 1000:.0f}s），基于现有 frame 继续'
     )
     return False
 
@@ -4273,97 +4262,37 @@ async def process_video(browser_context, record):
         # 重试/上一条若遗留了「延后删盘」，先清掉，避免占满 uploads/ 或干扰本轮
         _flush_upload_temp_cleanup(page)
         logger.info(f'\n=== 发表视频：{record.get("title", "")} ===')
-        # 先导航到平台首页，再通过导航进入发表页面
-        await page.goto('https://channels.weixin.qq.com/platform',
-                        wait_until='domcontentloaded', timeout=30000)
-        await page.wait_for_timeout(5000)
-        login_state = await detect_login_state(page)
-        if not login_state.get('logged_in'):
-            result['status'] = 'failed'
-            result['error'] = '当前未登录，请先扫码登录'
-            result['_loginExpired'] = True
-            result['_errorType'] = 'login-expired'
-            return result
+        
+        # 直接导航到发表页，不再经过 /platform 首页中转
+        logger.info('  Navigating directly to /platform/post/create...')
+        try:
+            await page.goto('https://channels.weixin.qq.com/platform/post/create',
+                            wait_until='domcontentloaded', timeout=30000)
+            await page.wait_for_timeout(3000)
+            
+            # 检查是否被重定向到登录页
+            if 'login.html' in page.url:
+                logger.error(f'  [Error] Redirected to login page: {page.url}')
+                # 尝试一次 detect_login_state 做二次确认
+                login_state = await detect_login_state(page)
+                if not login_state.get('logged_in'):
+                    result['status'] = 'failed'
+                    result['error'] = '登录失效或 Profile 未能正确加载，请重新扫码登录后再试。'
+                    result['_loginExpired'] = True
+                    result['_errorType'] = 'login-expired'
+                    return result
 
-        # 先直达发表页；部分版本会落到 /micro/content/post/create
-        if '/post/create' not in page.url:
-            logger.info('  Trying direct URL /platform/post/create...')
-            try:
+            # 如果没带 post/create，说明直达失败，可能被中间页拦截，再试一次
+            if '/post/create' not in page.url:
+                logger.info(f'  Current URL is {page.url}, retrying direct target...')
                 await page.goto('https://channels.weixin.qq.com/platform/post/create',
                                 wait_until='domcontentloaded', timeout=20000)
-                # 给页面 JS 运行一点时间，防止立即重定向
                 await page.wait_for_timeout(3000)
-                
-                # 如果被重定向回首页，再试一次
-                if '/post/create' not in page.url:
-                    logger.info('  Redirected, retrying direct URL...')
-                    await page.goto('https://channels.weixin.qq.com/platform/post/create',
-                                    wait_until='domcontentloaded', timeout=20000)
-                    await page.wait_for_timeout(3000)
-                if '/post/create' not in page.url:
-                    logger.info('  Falling back to direct URL /micro/content/post/create...')
-                    await page.goto('https://channels.weixin.qq.com/micro/content/post/create',
-                                    wait_until='domcontentloaded', timeout=20000)
-                    await page.wait_for_timeout(2500)
-            except Exception as e:
-                logger.info(f'  Direct URL /platform/post/create failed: {e}')
 
-        # 如果直达后仍未出现上传控件，再尝试通过侧边菜单进入发表页
-        if '/post/create' not in page.url or not await _collect_video_file_inputs(page):
-            cur_url = (page.url or '').lower()
-            # 先判定是否处于“可见导航容器”页面，再决定是否走菜单点击
-            nav_containers = [
-                page.locator('.menu-list, .menu-panel, .left-menu, aside[role="navigation"]').first,
-                page.locator('[class*="menu"]').filter(has_text=re.compile(r'内容管理|发表视频|视频管理')).first,
-            ]
-            nav_visible = False
-            for nc in nav_containers:
-                try:
-                    if await nc.count() > 0 and await nc.is_visible():
-                        nav_visible = True
-                        break
-                except Exception:
-                    continue
+        except Exception as e:
+            logger.info(f'  Direct navigation failed: {e}')
+            # 即使失败也继续，后面还有 frame 扫描逻辑兜底
 
-            if '/micro/content/post/create' in cur_url and not nav_visible:
-                logger.info('  Already in micro create page and no visible nav container; skip menu navigation')
-            else:
-                logger.info('  Looking for upload entry via navigation...')
-                # 给左侧导航一点渲染时间，避免过早判定 miss
-                await page.wait_for_timeout(800)
-                nav_steps = [
-                    {'action': 'click', 'selector': page.get_by_text('内容管理', exact=True),
-                     'desc': '内容管理'},
-                    {'action': 'click', 'selector': page.get_by_text(
-                        re.compile(r'内容管理|发表视频|视频管理')),
-                     'desc': '内容/发表/视频管理 (模糊)'},
-                    {'action': 'click', 'selector': page.get_by_text('发表视频', exact=True),
-                     'desc': '发表视频'},
-                    {'action': 'click', 'selector': page.get_by_role(
-                        'button', name=re.compile(r'发布视频|发表视频|上传视频|创作')),
-                     'desc': '发布/发表/上传/创作按钮'},
-                ]
-
-                for step in nav_steps:
-                    try:
-                        # 如果当前已经在发表页了，就不再点菜单
-                        if '/post/create' in page.url and await _collect_video_file_inputs(page):
-                            break
-                        el = step['selector'].first
-                        found_visible = False
-                        try:
-                            await el.wait_for(state='visible', timeout=1200)
-                            found_visible = True
-                        except Exception:
-                            found_visible = False
-                        if found_visible:
-                            await el.click(timeout=3000)
-                            logger.info(f'  Clicked: {step["desc"]}')
-                            await page.wait_for_timeout(3000)
-                        else:
-                            logger.info(f'  Nav miss: {step["desc"]}')
-                    except Exception:
-                        logger.info(f'  Nav error: {step["desc"]}')
 
         # 触发上传区域
         await _prime_upload_zone(page)
@@ -4375,51 +4304,53 @@ async def process_video(browser_context, record):
         found_input = False
         last_wait_log_sec = -1
         while time.time() < t_deadline:
-            if await _collect_video_file_inputs(page):
+            ranked = await _collect_video_file_inputs(page)
+            if ranked:
                 found_input = True
                 break
-            # 每隔 3 秒尝试重新点击一下上传区，或者刷新页面
+            
             elapsed = 30 - (t_deadline - time.time())
             cur_sec = int(elapsed)
-            if elapsed > 5 and cur_sec % 4 == 0 and cur_sec != last_wait_log_sec:
+            if cur_sec != last_wait_log_sec:
                 last_wait_log_sec = cur_sec
-                logger.info(f'  Still waiting for input ({int(elapsed)}s)... re-priming zone')
-                await _prime_upload_zone(page)
+                logger.info(f'  Still waiting for input ({int(30 - elapsed)}s)... current URL: {page.url}')
             
-            # 如果等了 10 秒还没出来，尝试重新进入发表页
-            if int(elapsed) == 10:
-                logger.info('  Waiting too long, trying direct URL again...')
-                try:
-                    await page.goto('https://channels.weixin.qq.com/platform/post/create',
-                                    wait_until='domcontentloaded', timeout=15000)
-                    await _wait_for_micro_iframe(page, timeout_ms=5000)
-                except Exception:
-                    pass
-                    
-            await page.wait_for_timeout(400)
+            # 每隔 5 秒尝试重新激活一下上传区
+            if cur_sec > 0 and cur_sec % 5 == 0 and cur_sec != last_wait_log_sec:
+                await _prime_upload_zone(page)
+
+            # 如果等了超过 10s 还没找到，且 URL 明显不对（不在发表页），尝试强制重跳
+            if elapsed > 10 and '/post/create' not in page.url:
+                logger.info(f'  URL looks wrong ({page.url}), forcing direct jump to /platform/post/create...')
+                await page.goto('https://channels.weixin.qq.com/platform/post/create', wait_until='domcontentloaded')
+                await page.wait_for_timeout(3000)
+
+            await page.wait_for_timeout(500)
         
         if not found_input:
+            # 失败前保存现场诊断信息
             try:
-                frame_urls = [((fr.url or '')[:120]) for fr in page.frames]
-                logger.info(f'  当前页面 URL: {page.url}')
-                logger.info(f'  当前 frame 列表: {frame_urls}')
-            except Exception:
-                pass
-            if not os.path.exists(SCREENSHOTS_DIR):
-                os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-            ts = int(time.time() * 1000)
-            sfx = _safe_filename(record.get('title', '') or 'unknown', 30)
-            await page.screenshot(
-                path=os.path.join(SCREENSHOTS_DIR, f'debug_{ts}_{sfx}.png'),
-                full_page=True
-            )
-            with open(os.path.join(SCREENSHOTS_DIR, f'debug_{ts}_{sfx}.html'),
-                      'w', encoding='utf-8') as f:
-                f.write(await page.content())
-            logger.info(f'  Debug: screenshots/debug_{ts}_{sfx}.png + .html (url: {page.url})')
+                if not os.path.exists(SCREENSHOTS_DIR):
+                    os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+                ts = int(time.time() * 1000)
+                sfx = _safe_filename(record.get('title', '') or 'unknown', 30)
+                diag_png = os.path.join(SCREENSHOTS_DIR, f'fail_{ts}_{sfx}.png')
+                diag_html = os.path.join(SCREENSHOTS_DIR, f'fail_{ts}_{sfx}.html')
+                
+                await page.screenshot(path=diag_png, full_page=True)
+                with open(diag_html, 'w', encoding='utf-8') as f:
+                    f.write(await page.content())
+                
+                logger.info(f'  [Debug] Current URL: {page.url}')
+                logger.info(f'  [Debug] Screenshot saved: {diag_png}')
+                for i, fr in enumerate(page.frames):
+                    logger.info(f'  [Debug] Frame {i}: {fr.url[:120]}')
+            except Exception as diag_err:
+                logger.warn(f'  Failed to save diagnostic info: {diag_err}')
+                
             raise Exception(
-                'input[type=file] not found after 30s — '
-                'page may have changed or iframe failed to load. Screenshot saved.'
+                f'发表页上传输入框加载失败（超时 30s）。当前 URL: {page.url}。'
+                '请检查扫码登录是否过期，或手动打开浏览器查看页面状态。'
             )
 
         logger.info(f'  Upload: {record.get("video_path", "")}')
