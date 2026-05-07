@@ -522,14 +522,42 @@ def _headless_launch_kwargs(profile_dir):
     # 使用真实的 macOS Chrome User Agent，避免 HeadlessChrome 标识
     user_agent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
     args = [
-        '--disable-crash-reporter',
-        '--disable-crashpad-for-testing',
-        '--password-store=basic',
-        '--use-mock-keychain',
         '--disable-blink-features=AutomationControlled',
         '--no-sandbox',
         '--disable-gpu',
         '--disable-dev-shm-usage',
+        '--password-store=basic',
+        '--use-mock-keychain',
+        '--disable-background-networking',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-breakpad',
+        '--disable-client-side-phishing-detection',
+        '--disable-component-update',
+        '--disable-default-apps',
+        '--disable-domain-reliability',
+        '--disable-features=AudioServiceOutOfProcess',
+        '--disable-hang-monitor',
+        '--disable-ipc-flooding-protection',
+        '--disable-notifications',
+        '--disable-offer-store-unmasked-cards',
+        '--disable-popup-blocking',
+        '--disable-print-preview',
+        '--disable-prompt-on-repost',
+        '--disable-setuid-sandbox',
+        '--disable-speech-api',
+        '--disable-sync',
+        '--hide-scrollbars',
+        '--ignore-gpu-blacklist',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--no-first-run',
+        '--no-pings',
+        '--no-zygote',
+        '--password-store=basic',
+        '--use-gl=angle',
+        '--use-angle=swiftshader',
     ]
     
     return {
@@ -539,7 +567,7 @@ def _headless_launch_kwargs(profile_dir):
         'user_agent': user_agent,
         'viewport': {'width': 1440, 'height': 900},
         'locale': 'zh-CN',
-        'ignore_default_args': _headless_ignore_default_args(),
+        'ignore_default_args': ['--enable-automation'],
         'env': _browser_process_env(profile_dir),
     }
 
@@ -600,9 +628,9 @@ async def init_browser(profile_dir, headless=True):
     args = [
         '--disable-infobars',
         '--disable-extensions',
+        '--disable-blink-features=AutomationControlled',
         '--password-store=basic',
         '--use-mock-keychain',
-        '--disable-blink-features=AutomationControlled',
     ]
     
     # 针对 Linux 和 Windows 的特定优化
@@ -929,6 +957,8 @@ async def _wx_upload_cover_ready(page) -> tuple[bool, str]:
     }"""
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             r = await fr.evaluate(js)
         except Exception:
             r = None
@@ -936,6 +966,8 @@ async def _wx_upload_cover_ready(page) -> tuple[bool, str]:
             return True, f'{r.get("reason", "")}:{r.get("hint", "")}'
     # Playwright 兜底（部分布局下 evaluate 选区未命中）
     for fr in page.frames:
+        if fr.is_detached():
+            continue
         for sel in (
             '[class*="media-status"] img[src^="http"]',
             '[class*="media-status-body"] img[src^="http"]',
@@ -1068,8 +1100,12 @@ if (!window.__wxDiag) {
 
 async def _install_upload_diagnostics(page):
     """注入：1) XHR/fetch 上传字节统计  2) FileReader/Blob.slice 错误捕获"""
+    if page.is_closed():
+        return
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             await fr.evaluate(_UPLOAD_DIAG_JS)
         except Exception:
             pass
@@ -1081,8 +1117,12 @@ async def _read_upload_diagnostics(page) -> dict:
         'upDoneOk': 0, 'upDoneFail': 0, 'upInflight': 0,
         'upErrors': [], 'readErrors': []
     }
+    if page.is_closed():
+        return agg
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             d = await fr.evaluate('() => window.__wxDiag || null')
         except Exception:
             d = None
@@ -1144,6 +1184,8 @@ async def _wx_publish_button_ready(page) -> tuple[bool, str]:
     }"""
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             r = await fr.evaluate(js)
         except Exception:
             r = None
@@ -1316,6 +1358,10 @@ async def wait_for_upload_with_progress(page, abort_signal, video_path=None, rec
         return False
 
     while time.time() - start_time < max_wait:
+        if page.is_closed():
+            logger.warn('  Upload failed: Page closed unexpectedly')
+            return 'not_started'
+        
         if _check_abort(abort_signal):
             logger.warn('  Upload aborted by user')
             return 'aborted'
@@ -1442,14 +1488,14 @@ async def wait_for_upload_with_progress(page, abort_signal, video_path=None, rec
             )
             return 'stuck_progress'
 
-        # 每 1 秒报一次详细状态（含网络字节）
-        if now - last_diag_log >= 1:
+        # 每 2 秒报一次详细状态（含网络字节）
+        if now - last_diag_log >= 2:
             last_diag_log = now
             tag = 'Uploading' if upload_started else 'Waiting'
             extra = f' 页面约 {pct}%' if (upload_started and pct is not None) else ''
             logger.info(f'  {tag} {int(elapsed)}s{extra} | {_format_diag(diag)}')
 
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(2000)
 
     if upload_started:
         logger.warn(f'  Upload timeout ({max_wait}s)')
@@ -1649,6 +1695,8 @@ async def _prime_upload_zone(page):
             'div.post-add-media', '.upload-area', '.media-status-body'
         ]
         for fr in page.frames:
+            if fr.is_detached():
+                continue
             for h in hints:
                 try:
                     if h.startswith('.') or ' ' in h or '>' in h:
@@ -1681,6 +1729,8 @@ async def _collect_video_file_inputs(page):
     out = []
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             try:
                 fr_url = fr.url or ''
             except Exception:
@@ -1720,6 +1770,8 @@ async def _wait_for_micro_iframe(page, timeout_ms: int = 12000) -> bool:
                 logger.info(f'  [Debug] Waiting for input. Frames: {len(page.frames)}, Non-blank URLs: {current_urls[:3]}...')
 
             for fr in page.frames:
+                if fr.is_detached():
+                    continue
                 u = (getattr(fr, 'url', '') or '').lower()
                 if ('micro/content' not in u) and ('/platform/post/create' not in u):
                     continue
@@ -3202,6 +3254,8 @@ async def set_schedule_publish(page, target_dt) -> bool:
     rest = []
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             loc = fr.locator('.post-time-wrap')
             if await loc.count() == 0:
                 rest.append(fr)
@@ -3281,6 +3335,8 @@ async def _schedule_publish_state_matches(page, target_dt) -> tuple[bool, str]:
     }"""
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             r = await fr.evaluate(js, [want_date, want_hm, want_h, want_m])
         except Exception:
             r = None
@@ -3414,6 +3470,8 @@ async def _unhide_all_file_inputs(page):
     }"""
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             await fr.evaluate(js)
         except Exception:
             pass
@@ -3478,6 +3536,8 @@ async def _install_file_clear_protection(page):
     total_protected = 0
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             n = await fr.evaluate(js)
             if isinstance(n, (int, float)):
                 total_protected += int(n)
@@ -3501,6 +3561,8 @@ async def _snapshot_upload_signals(page) -> dict:
     }
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             snap['progress_count'] += await fr.locator(
                 'progress, .weui-desktop-progress, [class*="progress-bar"], '
                 '[class*="ProgressBar"]'
@@ -3508,24 +3570,32 @@ async def _snapshot_upload_signals(page) -> dict:
         except Exception:
             pass
         try:
+            if fr.is_detached():
+                continue
             snap['percent_text'] += await fr.locator(
                 'text=/\\b\\d{1,3}%/'
             ).count()
         except Exception:
             pass
         try:
+            if fr.is_detached():
+                continue
             snap['uploading_text'] += await fr.locator(
                 'text=/上传中|处理中|转码中|uploading\\.\\.\\./i'
             ).count()
         except Exception:
             pass
         try:
+            if fr.is_detached():
+                continue
             snap['filename_text'] += await fr.locator(
                 'text=/wx_remux_|\\.mp4(?!\\w)|\\.mov(?!\\w)/i'
             ).count()
         except Exception:
             pass
         try:
+            if fr.is_detached():
+                continue
             snap['video_count'] += await fr.locator('video').count()
         except Exception:
             pass
@@ -3600,6 +3670,8 @@ async def _dump_all_file_inputs(page):
     try:
         for fr in page.frames:
             try:
+                if fr.is_detached():
+                    continue
                 arr = await fr.evaluate(js)
                 if isinstance(arr, list) and arr:
                     for j, info in enumerate(arr):
@@ -3620,6 +3692,8 @@ async def _read_clear_protection_stats(page):
     out = {'count': 0, 'blocks': 0}
     for fr in page.frames:
         try:
+            if fr.is_detached():
+                continue
             r = await fr.evaluate('() => window.__wxUploadProtect || null')
             if r and isinstance(r, dict):
                 out['count'] += int(r.get('count') or 0)

@@ -166,6 +166,20 @@ def ensure_primary_account_name(name):
     return (name or '').strip() == PRIMARY_ACCOUNT_NAME
 
 
+def _is_expected_closed_error(err) -> bool:
+    msg = str(err or '').lower()
+    if not msg:
+        return False
+    markers = (
+        'target page, context or browser has been closed',
+        'browser has been closed',
+        'context has been closed',
+        'page has been closed',
+        'frame was detached',
+    )
+    return any(m in msg for m in markers)
+
+
 def parse_version_tuple(version):
     parts = re.findall(r'\d+', str(version or '0'))
     nums = [int(p) for p in parts[:4]]
@@ -646,11 +660,15 @@ def _prepare_visible_browser_profile(profile_dir):
 def _sync_profile_back(temp_profile_dir, target_profile_dir):
     """Merge login/session data from temporary profile back to the real profile."""
     if not temp_profile_dir or not target_profile_dir:
-        return
+        return False
     src = os.path.abspath(temp_profile_dir)
     dst = os.path.abspath(target_profile_dir)
+    # 临时目录可能已被系统或上游清理，属于可预期场景：直接跳过，不视为错误。
+    if not os.path.isdir(src):
+        return False
     os.makedirs(dst, exist_ok=True)
     _copy_profile_tree(src, dst)
+    return True
 
 
 def _cleanup_temp_profile(ctx, persist_back=False):
@@ -662,8 +680,9 @@ def _cleanup_temp_profile(ctx, persist_back=False):
     target_profile_dir = getattr(ctx, '_wx_origin_profile_dir', None)
     if persist_back and temp_profile_dir and target_profile_dir:
         try:
-            _sync_profile_back(temp_profile_dir, target_profile_dir)
-            logger.info(f'Profile synced back to: {target_profile_dir}')
+            synced = _sync_profile_back(temp_profile_dir, target_profile_dir)
+            if synced:
+                logger.info(f'Profile synced back to: {target_profile_dir}')
         except Exception as e:
             logger.warn(f'Profile sync-back failed: {e}')
     if temp_root:
@@ -690,6 +709,35 @@ def _kill_mac_browser_processes_for_profile(profile_dir):
             )
         except Exception:
             pass
+
+
+def _close_account_browser_for_upload_start(name, acct):
+    """上传前强制关闭已打开浏览器（不抛错），确保上传队列可直接继续。"""
+    ctx = active_contexts.get(name)
+    with _browser_loop_lock:
+        loop = _browser_loops.get(name)
+
+    if ctx is not None and loop is not None and not loop.is_closed():
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _async_close_account_browser(name), loop
+            ).result(timeout=45)
+        except Exception as e:
+            logger.warn(f'upload_start: close existing browser failed, continue anyway: {e}')
+    else:
+        ex = active_contexts.pop(name, None)
+        if ex is not None:
+            try:
+                run_async_sync(ex.close())
+            except Exception:
+                pass
+
+    # 保险：把残留进程也清掉，避免 profile 被占用
+    try:
+        if sys.platform == 'darwin':
+            _kill_mac_browser_processes_for_profile(acct['profileDir'])
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════════════
@@ -783,6 +831,8 @@ def api_delete_account(name):
 def api_open_browser(name):
     """Launch a visible Chrome window to operate the account directly."""
     try:
+        if upload_state.get('running'):
+            return jsonify({'error': '当前有上传任务进行中，上传完成后才可打开账号浏览器'}), 409
         if not ensure_primary_account_name(name):
             return jsonify({'error': '当前为单账号模式，仅支持主账号'}), 403
         acct = getAccount(name)
@@ -861,6 +911,8 @@ def api_login(name):
     """Launch a visible Chrome window for WeChat QR login.
     Polls page URL every 2s; closes window and updates status on success."""
     try:
+        if upload_state.get('running'):
+            return jsonify({'error': '当前有上传任务进行中，上传完成后才可扫码登录'}), 409
         if not ensure_primary_account_name(name):
             return jsonify({'error': '当前为单账号模式，仅支持主账号'}), 403
         acct = getAccount(name)
@@ -991,6 +1043,14 @@ async def _login_async(name, acct):
             })
 
     except Exception as e:
+        if _is_expected_closed_error(e):
+            # 浏览器被手动关闭或无头进程退出时属于预期噪音，按 closed 处理即可
+            broadcast({
+                'type': 'login-result',
+                'account': name,
+                'result': 'closed'
+            })
+            return
         logger.error(f'Login error for {acct["label"]}: {e}')
         broadcast({
             'type': 'login-result',
@@ -1029,14 +1089,26 @@ async def _check_account_login_state(page):
             logger.info(f'verify: reached {probe_url}, current url: {page.url}')
         except Exception as e:
             err_msg = str(e)
-            logger.warn(f'verify: goto {probe_url} failed: {err_msg}')
+            if not _is_expected_closed_error(err_msg):
+                logger.warn(f'verify: goto {probe_url} failed: {err_msg}')
             if 'closed' in err_msg.lower() or 'terminate' in err_msg.lower():
                 last_state = {'logged_in': False, 'reason': 'browser_crash', 'detail': err_msg}
                 break
             continue
 
         for attempt in range(3):
-            await page.wait_for_timeout(1500 if attempt == 0 else 1000)
+            try:
+                if page.is_closed():
+                    break
+                await page.wait_for_timeout(1500 if attempt == 0 else 1000)
+            except Exception as e:
+                if not _is_expected_closed_error(e):
+                    logger.warn(f'verify: wait_for_timeout failed: {e}')
+                last_state = {'logged_in': False, 'reason': 'browser_crash', 'detail': str(e)}
+                break
+            
+            if page.is_closed():
+                break
             last_state = await detect_login_state(page)
             if last_state.get('logged_in'):
                 logger.info(
@@ -1090,7 +1162,8 @@ def api_verify(name):
         result = run_async_sync(_verify_async(name, acct))
         return jsonify(result), 200
     except Exception as e:
-        logger.error(f'verify exception: {e}')
+        if not _is_expected_closed_error(e):
+            logger.error(f'verify exception: {e}')
         return jsonify({
             'name': name,
             'valid': False,
@@ -1148,7 +1221,8 @@ async def _verify_hot_path(name):
             'detail': login_state.get('detail', ''),
         }
     except Exception as e:
-        logger.error(f'verify: goto/check failed: {e}')
+        if not _is_expected_closed_error(e):
+            logger.error(f'verify: goto/check failed: {e}')
         out = {
             'name': name,
             'valid': False,
@@ -1201,7 +1275,8 @@ async def _verify_async(name, acct):
             ctx._wx_temp_profile_root = temp_profile_root
             ctx._wx_temp_profile_dir = launch_profile_dir
     except Exception as e:
-        logger.error(f'verify: launch browser failed: {e}')
+        if not _is_expected_closed_error(e):
+            logger.error(f'verify: launch browser failed: {e}')
         if temp_profile_root:
             shutil.rmtree(temp_profile_root, ignore_errors=True)
         return {
@@ -1528,6 +1603,9 @@ def api_upload_start():
     acct = getAccount(account_name)
     if acct is None:
         return jsonify({'error': '账号不存在'}), 404
+
+    # 开始上传前：若有打开中的账号浏览器，直接关闭/清理后再继续，不作为错误返回
+    _close_account_browser_for_upload_start(account_name, acct)
 
     # Save for crash recovery
     with open(LAST_BATCH_PATH, 'w', encoding='utf-8') as f:
