@@ -1356,15 +1356,10 @@ def api_verify(name):
         passive = bool(data.get('passive'))
 
         if passive:
-            cached_status = str(acct.get('status') or '').strip() or 'needs-login'
-            return jsonify({
-                'name': name,
-                'valid': cached_status == 'ready',
-                'status': cached_status,
-                'reason': 'cached-status',
-                'detail': '后台校验仅读取缓存状态，不会启动浏览器。',
-                'passive': True,
-            }), 200
+            result = run_async_sync(_verify_async(name, acct))
+            if isinstance(result, dict):
+                result['passive'] = True
+            return jsonify(result), 200
 
         ctx = active_contexts.get(name)
         with _browser_loop_lock:

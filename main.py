@@ -581,7 +581,7 @@ def open_desktop():
         return False
 
     window_params = {
-        'title': '视频号批量上传 · 大金小怪',
+        'title': '视频号批量上传',
         'url': f'http://127.0.0.1:{PORT}',
         'width': 1200,
         'height': 800,

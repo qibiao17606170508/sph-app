@@ -10,7 +10,7 @@ BASE_PROFILE_DIR = os.path.join(_BASE_DIR, 'browser-profiles', 'default')
 PRIMARY_ACCOUNT_NAME = 'default'
 
 DEFAULT_ACCOUNTS = [
-    {'name': PRIMARY_ACCOUNT_NAME, 'profileDir': BASE_PROFILE_DIR, 'label': '主账号', 'status': 'ready', 'lastLogin': None, 'createdAt': None},
+    {'name': PRIMARY_ACCOUNT_NAME, 'profileDir': BASE_PROFILE_DIR, 'label': '主账号', 'status': 'needs-login', 'lastLogin': None, 'createdAt': None},
 ]
 
 

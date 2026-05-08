@@ -623,21 +623,26 @@ function connectWS() {
       loginLock = false;
       resetAddForm();
       const targetAccount = d.account || pendingLoginAccountName || getSelectedAccountName();
-      loadAccounts({ verifyAll: false, silent: true }).then(async () => {
-        if (targetAccount) {
-          await verifyAccount(targetAccount, { silent: true, buttonless: true, forceToastOnInvalid: true, passive: true });
-        } else {
-          updateAccountStatus();
-        }
-      });
+      const acct = getAccountByName(targetAccount) || getPrimaryAccount();
+      if (acct) {
+        acct.status = d.status || "ready";
+        acct.lastLogin = new Date().toISOString();
+      }
+      updateAccountPanel();
+      updateAccountStatus();
       pendingLoginAccountName = "";
       toast("登录成功", "success");
     }
     if (d.type === "login-result") {
       loginLock = false;
       resetAddForm();
+      const acct = getPrimaryAccount();
+      if (acct && d.result !== "success") {
+        acct.status = "needs-login";
+      }
       if (d.result !== "success") pendingLoginAccountName = "";
       updateAccountPanel();
+      updateAccountStatus();
       if (d.result === "expired") toast("二维码已过期，请重试", "warn");
       else if (d.result === "timeout") toast("登录超时，请重试", "warn");
       else if (d.result === "closed") toast("扫码已取消", "info");
@@ -763,10 +768,12 @@ function updateAccountPanel() {
 function applyVerifyResult(name, vData) {
   const acct = accounts.find((a) => a.name === name || a.name === vData.name) || getPrimaryAccount();
   if (!acct) return null;
-  acct.lastLogin = new Date().toISOString();
   if (!vData.error) {
     if (vData.valid === true) acct.status = "ready";
     else if (vData.valid === false) acct.status = "needs-login";
+    if (vData.valid === true) {
+      acct.lastLogin = new Date().toISOString();
+    }
   }
   updateAccountPanel();
   updateAccountStatus();
