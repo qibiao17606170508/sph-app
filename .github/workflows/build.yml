@@ -77,51 +77,70 @@ jobs:
         shell: bash
         run: |
           python -m pip install qiniu
-          python -c "
-          import os, sys, glob, time
-          from qiniu import Auth, put_file
-          
+          python - <<'PY'
+          import glob
+          import os
+          import sys
+          import time
+          from qiniu import Auth, Zone, put_file_v2, set_default
+
           # 极度强力的清理：移除可能被用户误填的引号、空格、换行等
-          ak = os.environ.get('QINIU_ACCESS_KEY', '').strip().strip('\'\"').strip()
-          sk = os.environ.get('QINIU_SECRET_KEY', '').strip().strip('\'\"').strip()
-          bucket = os.environ.get('QINIU_BUCKET', '').strip().strip('\'\"').strip()
-          
+          ak = os.environ.get('QINIU_ACCESS_KEY', '').strip().strip('\'"').strip()
+          sk = os.environ.get('QINIU_SECRET_KEY', '').strip().strip('\'"').strip()
+          bucket = os.environ.get('QINIU_BUCKET', '').strip().strip('\'"').strip()
+
           print(f'Debug: AK length={len(ak)}, SK length={len(sk)}')
-          
+
           zip_files = glob.glob('dist/*.zip')
           if not zip_files:
               print('Error: No zip file found in dist directory!')
               sys.exit(1)
-              
+
           file_path = zip_files[0]
           file_name = os.path.basename(file_path)
           key = f'releases/{file_name}'
-          
+
           print(f'Uploading {file_name} to Qiniu bucket: {bucket} ...')
-          
+
           q = Auth(ak, sk)
-          
-          # 带重试的上传逻辑，解决 504 Gateway Time-out
-          max_retries = 3
-          for attempt in range(max_retries):
-              # 每次重试重新生成 token
+          region = Zone.from_region_id('z2')
+          set_default(default_zone=region, connection_timeout=120, connection_retries=5)
+
+          file_size = os.path.getsize(file_path)
+          part_size = 8 * 1024 * 1024 if file_size < 512 * 1024 * 1024 else 16 * 1024 * 1024
+
+          max_retries = 5
+          for attempt in range(1, max_retries + 1):
               token = q.upload_token(bucket, key, 36000)
-              print(f'Attempt {attempt + 1}/{max_retries}...')
-              ret, info = put_file(token, key, file_path, version='v2')
-              
-              if info.status_code == 200:
+              print(f'Attempt {attempt}/{max_retries}...')
+              try:
+                  ret, info = put_file_v2(
+                      token,
+                      key,
+                      file_path,
+                      version='v2',
+                      bucket_name=bucket,
+                      part_size=part_size,
+                      regions=region,
+                  )
+              except Exception as exc:
+                  ret, info = None, None
+                  print(f'Upload exception: {exc}')
+
+              status_code = getattr(info, 'status_code', None)
+              if status_code == 200 and ret is not None:
                   print('Upload successful!')
                   sys.exit(0)
-              elif info.status_code == 504:
-                  print(f'Gateway timeout on attempt {attempt + 1}. Retrying in 10 seconds...')
-                  time.sleep(10)
-              else:
-                  print(f'Upload failed: {info}')
-                  sys.exit(1)
-                  
+
+              print(f'Upload failed: {info or "no response info"}')
+              if attempt < max_retries:
+                  sleep_seconds = min(15 * attempt, 45)
+                  print(f'Retrying in {sleep_seconds} seconds...')
+                  time.sleep(sleep_seconds)
+
           print('Max retries reached. Upload failed.')
           sys.exit(1)
-          "
+          PY
 
   release:
     name: Finalize Release (Manifest & Public Repo)
@@ -180,32 +199,54 @@ jobs:
         if: env.QINIU_ACCESS_KEY != '' && env.QINIU_SECRET_KEY != '' && env.QINIU_BUCKET != ''
         run: |
           python -m pip install qiniu
-          python -c "
-          import os, sys
-          from qiniu import Auth, put_file
-          
-          ak = os.environ.get('QINIU_ACCESS_KEY', '').strip().strip('\'\"').strip()
-          sk = os.environ.get('QINIU_SECRET_KEY', '').strip().strip('\'\"').strip()
-          bucket = os.environ.get('QINIU_BUCKET', '').strip().strip('\'\"').strip()
-          
+          python - <<'PY'
+          import os
+          import sys
+          import time
+          from qiniu import Auth, Zone, put_file_v2, set_default
+
+          ak = os.environ.get('QINIU_ACCESS_KEY', '').strip().strip('\'"').strip()
+          sk = os.environ.get('QINIU_SECRET_KEY', '').strip().strip('\'"').strip()
+          bucket = os.environ.get('QINIU_BUCKET', '').strip().strip('\'"').strip()
+
           file_path = 'release-assets/manifest.json'
           if not os.path.exists(file_path):
               print('Error: manifest.json not found!')
               sys.exit(1)
-              
+
           key = 'releases/manifest.json'
           print(f'Uploading manifest.json to Qiniu bucket: {bucket} ...')
-          
+
           q = Auth(ak, sk)
-          token = q.upload_token(bucket, key, 36000)
-          
-          ret, info = put_file(token, key, file_path, version='v2')
-          if info.status_code == 200:
-              print('Upload successful!')
-          else:
-              print(f'Upload failed: {info}')
-              sys.exit(1)
-          "
+          region = Zone.from_region_id('z2')
+          set_default(default_zone=region, connection_timeout=120, connection_retries=5)
+
+          for attempt in range(1, 4 + 1):
+              token = q.upload_token(bucket, key, 36000)
+              print(f'Attempt {attempt}/4...')
+              try:
+                  ret, info = put_file_v2(
+                      token,
+                      key,
+                      file_path,
+                      version='v2',
+                      bucket_name=bucket,
+                      regions=region,
+                  )
+              except Exception as exc:
+                  ret, info = None, None
+                  print(f'Upload exception: {exc}')
+
+              if getattr(info, 'status_code', None) == 200 and ret is not None:
+                  print('Upload successful!')
+                  sys.exit(0)
+
+              print(f'Upload failed: {info or "no response info"}')
+              if attempt < 4:
+                  time.sleep(5 * attempt)
+
+          sys.exit(1)
+          PY
 
       - name: Create Release in Public Repo
         env:

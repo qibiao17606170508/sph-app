@@ -624,7 +624,7 @@ function connectWS() {
       const targetAccount = d.account || pendingLoginAccountName || getSelectedAccountName();
       loadAccounts({ verifyAll: false, silent: true }).then(async () => {
         if (targetAccount) {
-          await verifyAccount(targetAccount, { silent: true, buttonless: true, forceToastOnInvalid: true });
+          await verifyAccount(targetAccount, { silent: true, buttonless: true, forceToastOnInvalid: true, passive: true });
         } else {
           updateAccountStatus();
         }
@@ -776,7 +776,7 @@ async function runBackgroundAccountVerify() {
   if (!authUser || loginLock || uploadRunning) return false;
   const name = getSelectedAccountName();
   if (!name) return false;
-  return verifyAccount(name, { silent: true, buttonless: true });
+  return verifyAccount(name, { silent: true, buttonless: true, passive: true });
 }
 
 function stopBackgroundAccountVerify() {
@@ -1704,7 +1704,7 @@ async function loadAccounts(options = {}) {
 
   const targets = primary ? (verifyAll ? [primary] : !primary.lastLogin || Number.isNaN(new Date(primary.lastLogin).getTime()) || Date.now() - new Date(primary.lastLogin).getTime() >= 3600000 ? [primary] : []) : [];
   if (targets.length > 0) {
-    const results = await Promise.allSettled(targets.map((a) => verifyAccount(a.name, { silent, buttonless: true })));
+    const results = await Promise.allSettled(targets.map((a) => verifyAccount(a.name, { silent, buttonless: true, passive: true })));
     if (!silent && results.some((r) => r.status === "fulfilled")) {
       toast("已完成视频号账号登录状态校验", "success");
     }
@@ -1724,7 +1724,7 @@ $("channelLoginBtn").addEventListener("click", () => {
 
 $("channelVerifyBtn").addEventListener("click", () => {
   if (loginLock) return toast("请先完成扫码登录", "warn");
-  verifyAccount(getSelectedAccountName());
+  verifyAccount(getSelectedAccountName(), { passive: true });
 });
 
 (() => {
@@ -1747,7 +1747,7 @@ function updateAccountStatus() {
 }
 
 async function verifyAccount(name, options = {}) {
-  const { silent = false, buttonless = false, forceToastOnInvalid = false } = options;
+  const { silent = false, buttonless = false, forceToastOnInvalid = false, passive = false } = options;
   if (accountVerifyPromises.has(name)) return accountVerifyPromises.get(name);
   const card = buttonless ? null : $("channelVerifyBtn");
   if (card) {
@@ -1759,7 +1759,7 @@ async function verifyAccount(name, options = {}) {
 
   const task = (async () => {
     try {
-      const vRes = await api(`/api/accounts/${name}/verify`, { method: "POST" });
+      const vRes = await api(`/api/accounts/${name}/verify`, { method: "POST", body: JSON.stringify({ passive }) });
       const vData = await vRes.json().catch(() => ({}));
       if (!vRes.ok) {
         if (!silent) toast(vData.error || "验证失败", "error");

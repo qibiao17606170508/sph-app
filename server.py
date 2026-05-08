@@ -1352,6 +1352,19 @@ def api_verify(name):
         acct = getAccount(name)
         if acct is None:
             return jsonify({'error': '账号不存在'}), 404
+        data = request.get_json(silent=True) or {}
+        passive = bool(data.get('passive'))
+
+        if passive:
+            cached_status = str(acct.get('status') or '').strip() or 'needs-login'
+            return jsonify({
+                'name': name,
+                'valid': cached_status == 'ready',
+                'status': cached_status,
+                'reason': 'cached-status',
+                'detail': '后台校验仅读取缓存状态，不会启动浏览器。',
+                'passive': True,
+            }), 200
 
         ctx = active_contexts.get(name)
         with _browser_loop_lock:
