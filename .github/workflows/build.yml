@@ -104,7 +104,7 @@ jobs:
 
           q = Auth(ak, sk)
           region = Zone.from_region_id('z2')
-          set_default(default_zone=region, connection_timeout=120, connection_retries=5)
+          set_default(connection_timeout=120, connection_retries=5)
 
           file_size = os.path.getsize(file_path)
           part_size = 8 * 1024 * 1024 if file_size < 512 * 1024 * 1024 else 16 * 1024 * 1024
@@ -219,7 +219,7 @@ jobs:
 
           q = Auth(ak, sk)
           region = Zone.from_region_id('z2')
-          set_default(default_zone=region, connection_timeout=120, connection_retries=5)
+          set_default(connection_timeout=120, connection_retries=5)
 
           for attempt in range(1, 4 + 1):
               token = q.upload_token(bucket, key, 36000)
