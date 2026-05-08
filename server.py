@@ -387,10 +387,98 @@ def launch_update_target(file_path):
         return
     subprocess.Popen(['xdg-open', file_path])
 
+def _resolve_macos_app_bundle(path):
+    p = os.path.realpath(path)
+    while True:
+        if p.endswith('.app'):
+            return p
+        np = os.path.dirname(p)
+        if np == p:
+            return ''
+        p = np
+
+def _get_current_macos_bundle():
+    exe = os.path.realpath(sys.executable)
+    p = os.path.dirname(exe)
+    for _ in range(6):
+        if p.endswith('.app'):
+            return p
+        np = os.path.dirname(p)
+        if np == p:
+            break
+        p = np
+    return ''
+
+def _rm_rf(path):
+    if not path:
+        return
+    try:
+        if os.path.islink(path) or os.path.isfile(path):
+            os.unlink(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
+
+def _copy_app_bundle(src, dst):
+    if sys.platform == 'darwin':
+        try:
+            subprocess.run(['ditto', src, dst], check=True)
+            return True
+        except Exception:
+            pass
+    try:
+        if os.path.isdir(dst):
+            shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+        return True
+    except Exception:
+        return False
+
+def install_update_macos(new_app_path):
+    new_app = _resolve_macos_app_bundle(new_app_path)
+    cur_app = _get_current_macos_bundle()
+    if not new_app:
+        return ''
+    if not cur_app:
+        return new_app
+    parent = os.path.dirname(cur_app)
+    base = os.path.basename(cur_app)
+    tmp_new = os.path.join(parent, base + '.new')
+    backup = os.path.join(parent, base + '.old')
+    _rm_rf(tmp_new)
+    ok = _copy_app_bundle(new_app, tmp_new)
+    if not ok or not os.path.exists(tmp_new):
+        _rm_rf(tmp_new)
+        return new_app
+    try:
+        if os.path.exists(backup):
+            _rm_rf(backup)
+        os.rename(cur_app, backup)
+    except Exception:
+        _rm_rf(tmp_new)
+        return new_app
+    try:
+        os.rename(tmp_new, cur_app)
+    except Exception:
+        try:
+            os.rename(backup, cur_app)
+        except Exception:
+            pass
+        _rm_rf(tmp_new)
+        return new_app
+    _rm_rf(backup)
+    return cur_app
+
 
 def _restart_app_process(open_target):
     try:
-        launch_update_target(open_target)
+        target = open_target
+        if sys.platform == 'darwin':
+            installed = install_update_macos(open_target)
+            if installed:
+                target = installed
+        launch_update_target(target)
     except Exception as e:
         set_update_state(
             running=False,
