@@ -376,7 +376,7 @@ function stopUpdateStatusPolling() {
 function showUpdateReadyMessage(state) {
   const version = esc(state.version || optionalUpdateInfo?.latest_version || forceUpdateInfo?.latest_version || "-");
   const target = esc(state.open_target || state.path || "");
-  const body = `新版本 <strong>v${version}</strong> 已准备完成，并已尝试自动打开。<br><br>` + `如果旧窗口仍在，请关闭后使用新版本。` + (target ? `<br><br>文件位置：<br><span style="word-break: break-all; color: var(--text-secondary)">${target}</span>` : "");
+  const body = `新版本 <strong>v${version}</strong> 已准备完成。<br><br>` + `如果自动重启失败，可手动打开下方文件位置中的新版本。` + (target ? `<br><br>文件位置：<br><span style="word-break: break-all; color: var(--text-secondary)">${target}</span>` : "");
   showModal("更新已准备完成", body);
 }
 
@@ -430,6 +430,7 @@ async function pollUpdateStatus() {
       showLoadingOverlay("正在重启…", state.message || "正在启动新版本并关闭当前应用...", {
         indeterminate: true,
       });
+      updateStatusPollTimer = setTimeout(pollUpdateStatus, 700);
       return;
     }
     if (state && state.status === "failed") {

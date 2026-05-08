@@ -2037,31 +2037,24 @@ def _perform_update_download(info):
         )
         prepared = prepare_downloaded_update(local_path, version)
         open_target = prepared.get('open_target') or local_path
+        if not os.path.exists(open_target):
+            raise FileNotFoundError('未找到新版本启动文件')
 
         set_update_state(
-            running=True,
-            status='running',
-            stage='opening',
+            running=False,
+            status='restarting',
+            stage='restarting',
             progress=100,
             indeterminate=True,
-            message='正在打开新版本...',
-            open_target=open_target,
-        )
-        open_downloaded_package(open_target)
-        set_update_state(
-            running=False,
-            status='completed',
-            stage='completed',
-            progress=100,
-            indeterminate=False,
-            message='更新已准备完成，正在等待重启应用。',
+            message='更新已完成，正在重启应用...',
             error='',
             path=local_path,
             open_target=open_target,
             finished_at=datetime.now(timezone.utc).isoformat(),
-            restart_ready=True,
-            restarting=False,
+            restart_ready=False,
+            restarting=True,
         )
+        threading.Thread(target=_restart_app_process, args=(open_target,), daemon=True).start()
     except Exception as e:
         set_update_state(
             running=False,
