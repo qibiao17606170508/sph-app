@@ -243,14 +243,22 @@ async function enterAuthedApp(user) {
   else if (currentView === "logs") await refreshLog();
 }
 
-async function checkAuth() {
+async function checkAuth(options = {}) {
+  const { allowAutoEnter = false } = options;
   try {
     const res = await api("/api/auth/status");
     const data = await res.json();
     authResolved = true;
     if (data && data.authenticated) {
-      await enterAuthedApp(data.user);
-      return;
+      if (authUser) {
+        setAuthUser(data.user || authUser);
+        return true;
+      }
+      if (allowAutoEnter) {
+        await enterAuthedApp(data.user);
+        return true;
+      }
+      return false;
     }
     if (data && data.expired) {
       setLoginError("登录已过期，请重新登录");
@@ -263,6 +271,7 @@ async function checkAuth() {
   }
   setAuthUser(null);
   showAuthShell();
+  return false;
 }
 
 function getOptionalUpdatePromptKey(info) {
@@ -367,9 +376,7 @@ function stopUpdateStatusPolling() {
 function showUpdateReadyMessage(state) {
   const version = esc(state.version || optionalUpdateInfo?.latest_version || forceUpdateInfo?.latest_version || "-");
   const target = esc(state.open_target || state.path || "");
-  const body = `新版本 <strong>v${version}</strong> 已准备完成，并已尝试自动打开。<br><br>` +
-    `如果旧窗口仍在，请关闭后使用新版本。` +
-    (target ? `<br><br>文件位置：<br><span style="word-break: break-all; color: var(--text-secondary)">${target}</span>` : "");
+  const body = `新版本 <strong>v${version}</strong> 已准备完成，并已尝试自动打开。<br><br>` + `如果旧窗口仍在，请关闭后使用新版本。` + (target ? `<br><br>文件位置：<br><span style="word-break: break-all; color: var(--text-secondary)">${target}</span>` : "");
   showModal("更新已准备完成", body);
 }
 
@@ -508,7 +515,7 @@ async function startDirectUpdate() {
 }
 
 async function runWindowOpenChecks(options = {}) {
-  const { force = false } = options;
+  const { force = false, autoEnterAuth = false } = options;
   const now = Date.now();
   if (!force && windowCheckInFlight) return windowCheckInFlight;
   if (!force && now - lastWindowCheckAt < WINDOW_RECHECK_THROTTLE_MS) return windowCheckInFlight || null;
@@ -517,7 +524,9 @@ async function runWindowOpenChecks(options = {}) {
   windowCheckInFlight = (async () => {
     const updateState = await checkForceUpdate();
     if (updateState && updateState.blocked) return updateState;
-    await checkAuth();
+    if (authUser || autoEnterAuth) {
+      await checkAuth({ allowAutoEnter: autoEnterAuth });
+    }
     if (updateState && updateState.info && updateState.info.available) {
       setTimeout(() => promptOptionalUpdate(updateState.info), 300);
     }
@@ -819,9 +828,10 @@ async function loadDashboard() {
       tb.innerHTML = `<table><thead><tr><th>视频</th><th>标题</th><th>状态</th><th>错误</th></tr></thead><tbody>${recent
         .map((r) => {
           const sc = (r.status || "").toLowerCase();
+          const displayTitle = r.title || cleanUploadName(r.video_path || "");
           return `<tr>
             <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.video_path || "")}">${esc((r.video_path || "").split("/").pop().split("\\").pop())}</td>
-            <td>${esc(r.title || "")}</td>
+            <td>${esc(displayTitle)}</td>
             <td><span class="status-cell ${sc}"><span class="dot"></span>${esc(getStatusText(r.status))}</span></td>
             <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-tertiary)" title="${esc(r.error || "")}">${esc(r.error || "")}</td>
           </tr>`;
@@ -1850,7 +1860,8 @@ function renderResultsTable() {
   tb.innerHTML = filtered
     .map((r) => {
       const sc = (r.status || "").toLowerCase();
-      return "<tr>" + '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(r.video_path || "") + '">' + esc((r.video_path || "").split("/").pop().split("\\").pop()) + "</td>" + "<td>" + esc(r.title || "") + "</td>" + '<td><span class="status-cell ' + sc + '"><span class="dot"></span>' + esc(getStatusText(r.status)) + "</span></td>" + '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-tertiary)" title="' + esc(r.error || "") + '">' + esc(r.error || "") + "</td>" + "</tr>";
+      const displayTitle = r.title || cleanUploadName(r.video_path || "");
+      return `<tr>` + `<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.video_path || "")}">${esc((r.video_path || "").split("/").pop().split("\\").pop())}</td>` + `<td>${esc(displayTitle)}</td>` + `<td><span class="status-cell ${sc}"><span class="dot"></span>${esc(getStatusText(r.status))}</span></td>` + `<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-tertiary)" title="${esc(r.error || "")}">${esc(r.error || "")}</td>` + `</tr>`;
     })
     .join("");
 }
@@ -2003,6 +2014,8 @@ document.addEventListener("visibilitychange", () => {
    INIT
    ═══════════════════════════════════════════════ */
 (async function initApp() {
+  authResolved = false;
+  setAuthUser(null);
   showAuthShell();
   loadRememberedLogin();
   fetchUpdateStatus()
@@ -2017,7 +2030,7 @@ document.addEventListener("visibilitychange", () => {
       }
     })
     .catch(() => {});
-  runWindowOpenChecks({ force: true })
+  runWindowOpenChecks({ force: true, autoEnterAuth: false })
     .then(() => {
       if (!authUser) {
         if ($("loginPassword").value) $("loginPassword").focus();
@@ -2026,11 +2039,7 @@ document.addEventListener("visibilitychange", () => {
     })
     .catch((e) => {
       console.error("Init check error:", e);
-      checkAuth().then(() => {
-        if (!authUser) {
-          if ($("loginPassword").value) $("loginPassword").focus();
-          else $("loginUsername").focus();
-        }
-      });
+      if ($("loginPassword").value) $("loginPassword").focus();
+      else $("loginUsername").focus();
     });
 })();

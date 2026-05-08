@@ -160,6 +160,7 @@ AUTH_LOGIN_URL = 'http://47.114.217.61:9988/api/v1/admin/login'
 AUTH_USER_INFO_URL = 'http://47.114.217.61:9988/api/v1/admin/user-info'
 DOWNLOADS_DIR = os.path.join(BASE_DIR, 'downloads')
 UPDATE_USER_AGENT = 'wechat-channels-uploader/1.0'
+AUTH_STATUS_GRACE_SECONDS = 8
 PUBLIC_API_PATHS = {
     '/api/auth/login',
     '/api/auth/status',
@@ -538,6 +539,7 @@ def clear_auth_session():
     session.pop('auth_user', None)
     session.pop('auth_payload', None)
     session.pop('auth_token', None)
+    session.pop('auth_login_at', None)
     session.modified = True
 
 
@@ -581,6 +583,50 @@ def validate_remote_auth_token(token):
     if 200 <= status_code < 300:
         return True, ''
     return True, ''
+
+
+def remote_auth_status(token):
+    token = str(token or '').strip()
+    if not token:
+        return False, 'missing_token', {}
+
+    req = urllib.request.Request(
+        AUTH_USER_INFO_URL,
+        headers={
+            'token': token,
+            'User-Agent': UPDATE_USER_AGENT,
+        },
+        method='GET',
+    )
+    try:
+        with urlopen_with_context(req, timeout=15) as resp:
+            status_code = resp.getcode()
+            raw = resp.read().decode('utf-8', errors='ignore')
+    except urllib.error.HTTPError as e:
+        status_code = e.code
+        raw = e.read().decode('utf-8', errors='ignore')
+    except Exception as e:
+        return True, f'validation_unavailable:{e}', {}
+
+    try:
+        payload = json.loads(raw) if raw else {}
+    except Exception:
+        payload = {}
+
+    if status_code == 401:
+        return False, 'unauthorized', payload if isinstance(payload, dict) else {}
+
+    if isinstance(payload, dict):
+        code = payload.get('code')
+        message = str(payload.get('message') or payload.get('msg') or '').strip()
+        if code == 10024 or '没登录' in message or '请先登录' in message:
+            return False, 'expired', payload
+        if payload.get('status') == 200 or code in (0, 200):
+            return True, '', payload
+
+    if 200 <= status_code < 300:
+        return True, '', payload if isinstance(payload, dict) else {}
+    return True, '', payload if isinstance(payload, dict) else {}
 
 
 def _request_login(payload_bytes, content_type):
@@ -898,8 +944,24 @@ def _close_account_browser_for_upload_start(name, acct):
 def api_auth_status():
     user = session.get('auth_user')
     token = session.get('auth_token')
-    if user:
-        valid, reason = validate_remote_auth_token(token)
+    login_at_raw = session.get('auth_login_at') or ((user or {}).get('loginAt') if isinstance(user, dict) else None)
+    if user and token:
+        grace_active = False
+        if login_at_raw:
+            try:
+                login_at = datetime.fromisoformat(str(login_at_raw).replace('Z', '+00:00'))
+                grace_active = (datetime.now(timezone.utc) - login_at).total_seconds() < AUTH_STATUS_GRACE_SECONDS
+            except Exception:
+                grace_active = False
+
+        if grace_active:
+            return jsonify({
+                'authenticated': True,
+                'user': user,
+                'grace': True,
+            })
+
+        valid, reason, payload = remote_auth_status(token)
         if not valid:
             clear_auth_session()
             return jsonify({
@@ -908,8 +970,12 @@ def api_auth_status():
                 'expired': True,
                 'reason': reason,
             })
+
+        if isinstance(payload, dict):
+            session['auth_payload'] = payload
+            session.modified = True
     return jsonify({
-        'authenticated': bool(user),
+        'authenticated': bool(user and token),
         'user': user,
     })
 
@@ -936,6 +1002,7 @@ def api_auth_login():
     }
     session['auth_payload'] = raw_payload if isinstance(raw_payload, dict) else {}
     session['auth_token'] = token
+    session['auth_login_at'] = session['auth_user']['loginAt']
     session.modified = True
     return jsonify({
         'message': '登录成功',

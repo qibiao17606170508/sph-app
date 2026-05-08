@@ -219,9 +219,14 @@ def write_results(results, results_path=None):
     header = 'video_path,title,status,error'
     rows = [header]
     for r in results:
+        vp = (r.get('video_path', '') or '').strip()
+        bn = os.path.basename(vp) if vp else ''
+        if bn:
+            bn = re.sub(r'^\d{14}_', '', bn)
+        title_eff = (r.get('title', '') or '').strip() or bn
         rows.append(','.join([
             csv_escape(r.get('video_path', '')),
-            csv_escape(r.get('title', '')),
+            csv_escape(title_eff),
             csv_escape(r.get('status', '')),
             csv_escape(r.get('error', '')),
         ]))
