@@ -18,6 +18,7 @@ let currentVersion = "0.0.0";
 let forceUpdateInfo = null;
 let optionalUpdateInfo = null;
 let updateStatusPollTimer = null;
+let restartTriggered = false;
 const WINDOW_RECHECK_THROTTLE_MS = 30 * 1000;
 let windowCheckInFlight = null;
 let lastWindowCheckAt = 0;
@@ -372,6 +373,30 @@ function showUpdateReadyMessage(state) {
   showModal("更新已准备完成", body);
 }
 
+async function restartIntoUpdatedApp() {
+  if (restartTriggered) return;
+  restartTriggered = true;
+  try {
+    showLoadingOverlay("正在重启…", "正在启动新版本并关闭当前应用...", { indeterminate: true });
+    const res = await fetch("/api/update/restart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok && res.status !== 202) {
+      restartTriggered = false;
+      throw new Error(data.error || "重启失败，请手动打开新版本");
+    }
+  } catch (e) {
+    restartTriggered = false;
+    hideLoadingOverlay();
+    setUpdateButtonsBusy(false);
+    setUpdateError(e.message || "重启失败，请手动打开新版本");
+    showUpdateReadyMessage({ ...(optionalUpdateInfo || forceUpdateInfo || {}), ...(e.state || {}) });
+  }
+}
+
 async function pollUpdateStatus() {
   stopUpdateStatusPolling();
   try {
@@ -390,16 +415,24 @@ async function pollUpdateStatus() {
 
     if (state && state.status === "completed") {
       setUpdateError("");
-      $("updateNotes").textContent = state.message || "更新已准备完成，请关闭旧窗口后使用新版本。";
-      showUpdateReadyMessage(state);
+      $("updateNotes").textContent = state.message || "更新已准备完成，正在重启应用。";
+      await restartIntoUpdatedApp();
+      return;
+    }
+    if (state && state.status === "restarting") {
+      showLoadingOverlay("正在重启…", state.message || "正在启动新版本并关闭当前应用...", {
+        indeterminate: true,
+      });
       return;
     }
     if (state && state.status === "failed") {
+      restartTriggered = false;
       const message = state.error || "更新失败，请稍后重试";
       setUpdateError(message);
       toast(message, "error");
     }
   } catch (e) {
+    restartTriggered = false;
     setUpdateButtonsBusy(false);
     hideLoadingOverlay();
     setUpdateError("无法获取更新进度，请检查网络后重试");
@@ -457,6 +490,11 @@ async function startDirectUpdate() {
       body: JSON.stringify({}),
     });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 409 && data && data.state && data.state.running) {
+      $("updateNotes").textContent = "更新任务已在进行中，正在继续显示当前进度。";
+      await pollUpdateStatus();
+      return;
+    }
     if (!res.ok && res.status !== 202) {
       throw new Error(data.error || "更新失败，请稍后重试");
     }

@@ -168,6 +168,7 @@ PUBLIC_API_PATHS = {
     '/api/update/check',
     '/api/update/download',
     '/api/update/status',
+    '/api/update/restart',
 }
 update_state_lock = threading.Lock()
 update_state = {}
@@ -189,6 +190,8 @@ def reset_update_state():
             'open_target': '',
             'started_at': '',
             'finished_at': '',
+            'restart_ready': False,
+            'restarting': False,
         })
 
 
@@ -374,7 +377,7 @@ def sha256_file(file_path):
     return h.hexdigest()
 
 
-def open_downloaded_package(file_path):
+def launch_update_target(file_path):
     if sys.platform == 'win32':
         os.startfile(file_path)
         return
@@ -382,6 +385,31 @@ def open_downloaded_package(file_path):
         subprocess.Popen(['open', file_path])
         return
     subprocess.Popen(['xdg-open', file_path])
+
+
+def _restart_app_process(open_target):
+    try:
+        launch_update_target(open_target)
+    except Exception as e:
+        set_update_state(
+            running=False,
+            status='failed',
+            stage='failed',
+            indeterminate=False,
+            message='启动新版本失败',
+            error=str(e),
+            restart_ready=True,
+            restarting=False,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return
+
+    time.sleep(1.2)
+    try:
+        cleanup()
+    except Exception:
+        pass
+    os._exit(0)
 
 
 def get_update_extract_dir(version):
@@ -1882,6 +1910,8 @@ def _perform_update_download(info):
         open_target='',
         started_at=datetime.now(timezone.utc).isoformat(),
         finished_at='',
+            restart_ready=False,
+            restarting=False,
     )
 
     try:
@@ -1944,11 +1974,13 @@ def _perform_update_download(info):
             stage='completed',
             progress=100,
             indeterminate=False,
-            message='更新已准备完成，已为你打开新版本。若旧窗口仍在，请关闭后使用新版本。',
+            message='更新已准备完成，正在等待重启应用。',
             error='',
             path=local_path,
             open_target=open_target,
             finished_at=datetime.now(timezone.utc).isoformat(),
+            restart_ready=True,
+            restarting=False,
         )
     except Exception as e:
         set_update_state(
@@ -1959,12 +1991,49 @@ def _perform_update_download(info):
             message='更新失败',
             error=str(e),
             finished_at=datetime.now(timezone.utc).isoformat(),
+            restart_ready=False,
+            restarting=False,
         )
 
 
 @app.route('/api/update/status', methods=['GET'])
 def api_update_status():
     return jsonify(get_update_state())
+
+
+@app.route('/api/update/restart', methods=['POST'])
+def api_update_restart():
+    try:
+        state = get_update_state()
+        open_target = str(state.get('open_target') or '').strip()
+        if not open_target:
+            return jsonify({'error': '新版本尚未准备完成'}), 400
+        if state.get('restarting'):
+            return jsonify({
+                'message': '应用正在重启',
+                'state': state,
+            }), 202
+        if not os.path.exists(open_target):
+            return jsonify({'error': '未找到新版本启动文件'}), 400
+
+        set_update_state(
+            running=False,
+            status='restarting',
+            stage='restarting',
+            progress=100,
+            indeterminate=True,
+            message='正在启动新版本并关闭当前应用...',
+            error='',
+            restart_ready=False,
+            restarting=True,
+        )
+        threading.Thread(target=_restart_app_process, args=(open_target,), daemon=True).start()
+        return jsonify({
+            'message': '正在重启应用',
+            'state': get_update_state(),
+        }), 202
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/update/download', methods=['POST'])
