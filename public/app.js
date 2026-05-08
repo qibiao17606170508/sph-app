@@ -17,6 +17,7 @@ let backgroundVerifyTimer = null;
 let currentVersion = "0.0.0";
 let forceUpdateInfo = null;
 let optionalUpdateInfo = null;
+let updateStatusPollTimer = null;
 const WINDOW_RECHECK_THROTTLE_MS = 30 * 1000;
 let windowCheckInFlight = null;
 let lastWindowCheckAt = 0;
@@ -60,21 +61,51 @@ function setLoginError(message) {
   el.style.display = message ? "block" : "none";
 }
 
-function showLoadingOverlay(title, text) {
+function setLoadingOverlayProgress(progress, indeterminate = false) {
+  const wrap = $("loadingProgressWrap");
+  const fill = $("loadingProgressFill");
+  const text = $("loadingProgressText");
+  if (!wrap || !fill || !text) return;
+  const hasProgress = indeterminate || Number.isFinite(progress);
+  wrap.style.display = hasProgress ? "block" : "none";
+  if (!hasProgress) {
+    fill.style.width = "0%";
+    fill.style.opacity = "1";
+    text.textContent = "";
+    return;
+  }
+  if (indeterminate) {
+    fill.style.width = "100%";
+    fill.style.opacity = "0.45";
+    text.textContent = "处理中…";
+    return;
+  }
+  const pct = Math.max(0, Math.min(100, Math.round(progress)));
+  fill.style.width = pct + "%";
+  fill.style.opacity = "1";
+  text.textContent = pct + "%";
+}
+
+function showLoadingOverlay(title, text, options = {}) {
   $("loadingTitle").textContent = title || "处理中…";
   $("loadingText").textContent = text || "请稍候";
+  setLoadingOverlayProgress(options.progress, Boolean(options.indeterminate));
   $("loadingOverlay").style.display = "flex";
 }
 
 function hideLoadingOverlay() {
   $("loadingOverlay").style.display = "none";
+  setLoadingOverlayProgress(undefined, false);
 }
 
 function handleBlockingLoadingEvent(d) {
   if (!d || d.type !== "blocking-loading") return;
   const action = String(d.action || "").toLowerCase();
   if (action === "show" || action === "update") {
-    showLoadingOverlay(d.title || "安装中…", d.text || "正在安装插件，请稍候");
+    showLoadingOverlay(d.title || "安装中…", d.text || "正在安装插件，请稍候", {
+      progress: typeof d.progress === "number" ? d.progress : undefined,
+      indeterminate: Boolean(d.indeterminate),
+    });
     return;
   }
   if (action === "hide") {
@@ -308,6 +339,73 @@ function renderForceUpdate(info) {
   showUpdateShell();
 }
 
+function setUpdateButtonsBusy(busy) {
+  const updateBtn = $("updateNowBtn");
+  if (updateBtn) {
+    updateBtn.disabled = busy;
+    updateBtn.textContent = busy ? "更新中…" : "立即更新";
+  }
+  const checkBtn = $("checkUpdateBtn");
+  if (checkBtn) {
+    checkBtn.disabled = busy;
+    checkBtn.textContent = busy ? "更新中…" : "检查更新";
+  }
+}
+
+async function fetchUpdateStatus() {
+  const res = await fetch("/api/update/status");
+  return res.json();
+}
+
+function stopUpdateStatusPolling() {
+  if (!updateStatusPollTimer) return;
+  clearTimeout(updateStatusPollTimer);
+  updateStatusPollTimer = null;
+}
+
+function showUpdateReadyMessage(state) {
+  const version = esc(state.version || optionalUpdateInfo?.latest_version || forceUpdateInfo?.latest_version || "-");
+  const target = esc(state.open_target || state.path || "");
+  const body = `新版本 <strong>v${version}</strong> 已准备完成，并已尝试自动打开。<br><br>` +
+    `如果旧窗口仍在，请关闭后使用新版本。` +
+    (target ? `<br><br>文件位置：<br><span style="word-break: break-all; color: var(--text-secondary)">${target}</span>` : "");
+  showModal("更新已准备完成", body);
+}
+
+async function pollUpdateStatus() {
+  stopUpdateStatusPolling();
+  try {
+    const state = await fetchUpdateStatus();
+    if (state && state.running) {
+      showLoadingOverlay("正在更新…", state.message || "正在下载更新包，请稍候", {
+        progress: typeof state.progress === "number" ? state.progress : undefined,
+        indeterminate: Boolean(state.indeterminate),
+      });
+      updateStatusPollTimer = setTimeout(pollUpdateStatus, 700);
+      return;
+    }
+
+    setUpdateButtonsBusy(false);
+    hideLoadingOverlay();
+
+    if (state && state.status === "completed") {
+      setUpdateError("");
+      $("updateNotes").textContent = state.message || "更新已准备完成，请关闭旧窗口后使用新版本。";
+      showUpdateReadyMessage(state);
+      return;
+    }
+    if (state && state.status === "failed") {
+      const message = state.error || "更新失败，请稍后重试";
+      setUpdateError(message);
+      toast(message, "error");
+    }
+  } catch (e) {
+    setUpdateButtonsBusy(false);
+    hideLoadingOverlay();
+    setUpdateError("无法获取更新进度，请检查网络后重试");
+  }
+}
+
 function promptOptionalUpdate(info) {
   optionalUpdateInfo = info || null;
   if (!info || !info.available || info.required) return;
@@ -349,26 +447,25 @@ async function checkForceUpdate() {
 }
 
 async function startDirectUpdate() {
-  const btn = $("updateNowBtn");
-  btn.disabled = true;
-  btn.textContent = "更新中…";
+  setUpdateButtonsBusy(true);
   setUpdateError("");
   try {
+    showLoadingOverlay("正在更新…", "正在准备下载更新包...", { progress: 0, indeterminate: false });
     const res = await fetch("/api/update/download", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
+    if (!res.ok && res.status !== 202) {
       throw new Error(data.error || "更新失败，请稍后重试");
     }
-    $("updateNotes").textContent = "更新包已下载并尝试打开，请按系统提示完成安装。安装完成后重新打开软件即可。";
+    $("updateNotes").textContent = "正在下载并准备新版本，请勿关闭程序。";
+    await pollUpdateStatus();
   } catch (e) {
+    setUpdateButtonsBusy(false);
+    hideLoadingOverlay();
     setUpdateError(e.message || "更新失败，请稍后重试");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "立即更新";
   }
 }
 
@@ -1870,6 +1967,18 @@ document.addEventListener("visibilitychange", () => {
 (async function initApp() {
   showAuthShell();
   loadRememberedLogin();
+  fetchUpdateStatus()
+    .then((state) => {
+      if (state && state.running) {
+        setUpdateButtonsBusy(true);
+        showLoadingOverlay("正在更新…", state.message || "正在下载更新包，请稍候", {
+          progress: typeof state.progress === "number" ? state.progress : undefined,
+          indeterminate: Boolean(state.indeterminate),
+        });
+        pollUpdateStatus().catch((e) => console.error("Update status poll error:", e));
+      }
+    })
+    .catch(() => {});
   runWindowOpenChecks({ force: true })
     .then(() => {
       if (!authUser) {

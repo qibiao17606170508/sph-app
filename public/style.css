@@ -1906,6 +1906,21 @@ table tbody tr:last-child td {
   font-size: 14px;
 }
 
+.loading-progress-wrap {
+  margin-top: 16px;
+  text-align: left;
+}
+
+.loading-progress-bar {
+  margin-bottom: 6px;
+}
+
+.loading-progress-text {
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: right;
+}
+
 .modal {
   min-width: 360px;
   max-width: 520px;

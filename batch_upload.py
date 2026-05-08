@@ -214,7 +214,7 @@ def csv_escape(val):
 
 
 def write_results(results, results_path=None):
-    """Write results array to CSV with BOM."""
+    """Write the full results snapshot to CSV with BOM."""
     rp = results_path or RESULTS_PATH
     header = 'video_path,title,status,error'
     rows = [header]
@@ -227,6 +227,27 @@ def write_results(results, results_path=None):
         ]))
     with open(rp, 'w', encoding='utf-8-sig') as f:
         f.write('\n'.join(rows))
+
+
+def load_existing_results(results_path=None):
+    """Load historical results from CSV."""
+    rp = results_path or RESULTS_PATH
+    if not os.path.exists(rp):
+        return []
+    try:
+        with open(rp, 'r', encoding='utf-8-sig', newline='') as f:
+            reader = csv.DictReader(f)
+            rows = []
+            for row in reader:
+                rows.append({
+                    'video_path': row.get('video_path', '') or '',
+                    'title': row.get('title', '') or '',
+                    'status': row.get('status', '') or '',
+                    'error': row.get('error', '') or '',
+                })
+            return rows
+    except Exception:
+        return []
 
 
 def load_published_titles(results_path, resume):
@@ -809,7 +830,7 @@ def _bind_context_close_with_playwright(context, playwright_driver):
     return context
 
 
-async def init_browser(profile_dir, headless=True):
+async def init_browser(profile_dir, headless=True, allow_visible_fallback=True):
     """Launch a persistent Chromium browser context with the given profile."""
     _pw_path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')
     if sys.platform == 'win32':
@@ -854,14 +875,15 @@ async def init_browser(profile_dir, headless=True):
                 else:
                     logger.warn('  [Browser] Headless shell missing and no bundled chromium executable found.')
 
-                # 第二层兜底：仅 Windows，退回有界面模式，避免因 headless-shell 缺失直接失败。
-                visible_retry_kwargs = _windows_visible_fallback_launch_kwargs(profile_dir)
-                logger.warn('  [Browser] Retry launch with visible browser on Windows.')
-                try:
-                    context = await p.chromium.launch_persistent_context(**visible_retry_kwargs)
-                    return _bind_context_close_with_playwright(context, p)
-                except Exception as e_visible:
-                    logger.warn(f'  [Browser] Visible fallback launch failed: {e_visible}')
+                # 仅显式允许时才退回有界面模式；状态校验不应意外弹出浏览器窗口。
+                if allow_visible_fallback:
+                    visible_retry_kwargs = _windows_visible_fallback_launch_kwargs(profile_dir)
+                    logger.warn('  [Browser] Retry launch with visible browser on Windows.')
+                    try:
+                        context = await p.chromium.launch_persistent_context(**visible_retry_kwargs)
+                        return _bind_context_close_with_playwright(context, p)
+                    except Exception as e_visible:
+                        logger.warn(f'  [Browser] Visible fallback launch failed: {e_visible}')
             logger.warn(f'  [Browser] Headless launch failed via playwright-default: {e}')
             try:
                 await p.stop()
@@ -4850,6 +4872,7 @@ async def batch_upload(browser_context, records, options=None):
     on_progress = options.get('onProgress')
     on_login_expired = options.get('onLoginExpired')
 
+    history_results = [] if resume else load_existing_results(results_path)
     results = list(existing_results)
     published_set = load_published_titles(results_path, resume)
     login_expired_flag = False
@@ -4877,6 +4900,7 @@ async def batch_upload(browser_context, records, options=None):
                 'status': 'skipped',
                 'error': record.get('_skipReason', ''),
             })
+            write_results(history_results + results, results_path)
             if on_progress:
                 on_progress({'current': i + 1, 'total': total,
                              'status': 'skipped', 'title': record.get('title', '')})
@@ -4889,6 +4913,7 @@ async def batch_upload(browser_context, records, options=None):
                 'status': 'published',
                 'error': '',
             })
+            write_results(history_results + results, results_path)
             if on_progress:
                 on_progress({'current': i + 1, 'total': total,
                              'status': 'published', 'title': record.get('title', '')})
@@ -4901,6 +4926,7 @@ async def batch_upload(browser_context, records, options=None):
                 'status': 'failed',
                 'error': '登录已失效，请重新扫码登录',
             })
+            write_results(history_results + results, results_path)
             continue
 
         # 注意：「定时发表」改为使用视频号官方功能（在 process_video 里勾选「定时」 +
@@ -4922,7 +4948,7 @@ async def batch_upload(browser_context, records, options=None):
             handle_login_expired()
             if on_login_expired:
                 on_login_expired(record)
-        write_results(results, results_path)
+        write_results(history_results + results, results_path)
         if on_progress:
             on_progress({'current': i + 1, 'total': total,
                          'status': result['status'], 'title': record.get('title', '')})

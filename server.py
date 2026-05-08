@@ -6,6 +6,7 @@ Translated from server.js
 """
 
 import asyncio
+import csv
 import json
 import hashlib
 import os
@@ -22,6 +23,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request, send_from_directory, session
@@ -165,7 +167,42 @@ PUBLIC_API_PATHS = {
     '/api/version',
     '/api/update/check',
     '/api/update/download',
+    '/api/update/status',
 }
+update_state_lock = threading.Lock()
+update_state = {}
+
+
+def reset_update_state():
+    with update_state_lock:
+        update_state.clear()
+        update_state.update({
+            'running': False,
+            'status': 'idle',
+            'stage': 'idle',
+            'progress': 0,
+            'indeterminate': False,
+            'message': '',
+            'error': '',
+            'version': '',
+            'path': '',
+            'open_target': '',
+            'started_at': '',
+            'finished_at': '',
+        })
+
+
+def set_update_state(**kwargs):
+    with update_state_lock:
+        update_state.update(kwargs)
+
+
+def get_update_state():
+    with update_state_lock:
+        return dict(update_state)
+
+
+reset_update_state()
 
 
 def is_authenticated():
@@ -306,14 +343,26 @@ def resolve_update_info():
     }
 
 
-def download_update_package(download_url, version):
+def download_update_package(download_url, version, progress_callback=None):
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     platform_name = get_platform_name()
     filename = os.path.basename(urllib.parse.urlparse(download_url).path) or f'update-{platform_name}-{version}.zip'
     local_path = os.path.join(DOWNLOADS_DIR, filename)
     req = urllib.request.Request(download_url, headers={'User-Agent': UPDATE_USER_AGENT})
     with urlopen_with_context(req, timeout=120) as resp, open(local_path, 'wb') as f:
-        shutil.copyfileobj(resp, f)
+        try:
+            total = int(resp.headers.get('Content-Length') or '0')
+        except Exception:
+            total = 0
+        downloaded = 0
+        while True:
+            chunk = resp.read(256 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            downloaded += len(chunk)
+            if progress_callback:
+                progress_callback(downloaded, total, filename)
     return local_path
 
 
@@ -333,6 +382,66 @@ def open_downloaded_package(file_path):
         subprocess.Popen(['open', file_path])
         return
     subprocess.Popen(['xdg-open', file_path])
+
+
+def get_update_extract_dir(version):
+    safe_version = re.sub(r'[^0-9A-Za-z._-]+', '-', str(version or 'latest')).strip('-') or 'latest'
+    return os.path.join(DOWNLOADS_DIR, 'extracted', f'{get_platform_name()}-v{safe_version}')
+
+
+def safe_extract_zip(zip_fp, dest_dir):
+    dest_real = os.path.realpath(dest_dir)
+    for member in zip_fp.infolist():
+        member_name = member.filename.replace('\\', '/')
+        target_path = os.path.realpath(os.path.join(dest_dir, member_name))
+        if os.path.commonpath([dest_real, target_path]) != dest_real:
+            raise ValueError('更新包包含非法路径，已拒绝解压')
+        zip_fp.extract(member, dest_dir)
+
+
+def find_update_launch_target(root_dir):
+    if sys.platform == 'darwin':
+        for dirpath, dirnames, _ in os.walk(root_dir):
+            for dirname in sorted(dirnames):
+                if dirname.endswith('.app'):
+                    return os.path.join(dirpath, dirname)
+
+    exe_candidates = []
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        if '_internal' in dirpath.split(os.sep):
+            continue
+        if sys.platform == 'win32':
+            for filename in sorted(filenames):
+                if not filename.lower().endswith('.exe'):
+                    continue
+                full_path = os.path.join(dirpath, filename)
+                if '视频号批量上传' in filename:
+                    return full_path
+                exe_candidates.append(full_path)
+
+    if exe_candidates:
+        return exe_candidates[0]
+    return root_dir
+
+
+def prepare_downloaded_update(file_path, version):
+    if str(file_path).lower().endswith('.zip'):
+        extract_dir = get_update_extract_dir(version)
+        if os.path.isdir(extract_dir):
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        os.makedirs(extract_dir, exist_ok=True)
+        with zipfile.ZipFile(file_path, 'r') as zf:
+            safe_extract_zip(zf, extract_dir)
+        return {
+            'path': file_path,
+            'extract_dir': extract_dir,
+            'open_target': find_update_launch_target(extract_dir),
+        }
+    return {
+        'path': file_path,
+        'extract_dir': '',
+        'open_target': file_path,
+    }
 
 
 def login_response_ok(status_code, payload):
@@ -1280,7 +1389,11 @@ async def _verify_async(name, acct):
 
     ctx = None
     try:
-        ctx = await init_browser(launch_profile_dir, headless=True)
+        ctx = await init_browser(
+            launch_profile_dir,
+            headless=True,
+            allow_visible_fallback=False,
+        )
         if temp_profile_root:
             ctx._wx_temp_profile_root = temp_profile_root
             ctx._wx_temp_profile_dir = launch_profile_dir
@@ -1752,9 +1865,117 @@ def api_update_check():
         }), 200
 
 
+def _perform_update_download(info):
+    version = str(info.get('latest_version') or 'latest')
+    download_url = str(info.get('download_url') or '').strip()
+    expected_sha = str(info.get('sha256') or '').strip().lower()
+    set_update_state(
+        running=True,
+        status='running',
+        stage='downloading',
+        progress=0,
+        indeterminate=False,
+        message='正在下载更新包...',
+        error='',
+        version=version,
+        path='',
+        open_target='',
+        started_at=datetime.now(timezone.utc).isoformat(),
+        finished_at='',
+    )
+
+    try:
+        def on_progress(downloaded, total, _filename):
+            progress = int(downloaded * 100 / total) if total > 0 else 0
+            set_update_state(
+                running=True,
+                status='running',
+                stage='downloading',
+                progress=progress,
+                indeterminate=total <= 0,
+                message='正在下载更新包...',
+            )
+
+        local_path = download_update_package(download_url, version, progress_callback=on_progress)
+        set_update_state(
+            running=True,
+            status='running',
+            stage='verifying',
+            progress=100,
+            indeterminate=True,
+            message='正在校验更新包...',
+            path=local_path,
+        )
+
+        actual_sha = ''
+        if expected_sha:
+            actual_sha = sha256_file(local_path).lower()
+            if actual_sha != expected_sha:
+                try:
+                    os.remove(local_path)
+                except OSError:
+                    pass
+                raise ValueError('更新包校验失败，请重新下载')
+
+        set_update_state(
+            running=True,
+            status='running',
+            stage='preparing',
+            progress=100,
+            indeterminate=True,
+            message='正在准备新版本...',
+        )
+        prepared = prepare_downloaded_update(local_path, version)
+        open_target = prepared.get('open_target') or local_path
+
+        set_update_state(
+            running=True,
+            status='running',
+            stage='opening',
+            progress=100,
+            indeterminate=True,
+            message='正在打开新版本...',
+            open_target=open_target,
+        )
+        open_downloaded_package(open_target)
+        set_update_state(
+            running=False,
+            status='completed',
+            stage='completed',
+            progress=100,
+            indeterminate=False,
+            message='更新已准备完成，已为你打开新版本。若旧窗口仍在，请关闭后使用新版本。',
+            error='',
+            path=local_path,
+            open_target=open_target,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as e:
+        set_update_state(
+            running=False,
+            status='failed',
+            stage='failed',
+            indeterminate=False,
+            message='更新失败',
+            error=str(e),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+
+@app.route('/api/update/status', methods=['GET'])
+def api_update_status():
+    return jsonify(get_update_state())
+
+
 @app.route('/api/update/download', methods=['POST'])
 def api_update_download():
     try:
+        state = get_update_state()
+        if state.get('running'):
+            return jsonify({
+                'error': '已有更新任务正在进行中',
+                'state': state,
+            }), 409
         info = resolve_update_info()
         if not info.get('enabled'):
             return jsonify({'error': info.get('message') or '未配置更新地址'}), 400
@@ -1764,25 +1985,14 @@ def api_update_download():
         if not download_url:
             return jsonify({'error': '当前平台未配置下载地址'}), 400
 
-        local_path = download_update_package(download_url, info.get('latest_version') or 'latest')
-        expected_sha = str(info.get('sha256') or '').strip().lower()
-        actual_sha = ''
-        if expected_sha:
-            actual_sha = sha256_file(local_path).lower()
-            if actual_sha != expected_sha:
-                try:
-                    os.remove(local_path)
-                except OSError:
-                    pass
-                return jsonify({'error': '更新包校验失败，请重新下载'}), 400
-
-        open_downloaded_package(local_path)
+        reset_update_state()
+        t = threading.Thread(target=_perform_update_download, args=(info,), daemon=True)
+        t.start()
         return jsonify({
-            'message': '更新包已下载',
-            'path': local_path,
-            'sha256': actual_sha or expected_sha,
+            'message': '已开始下载更新',
+            'state': get_update_state(),
             'version': info.get('latest_version'),
-        })
+        }), 202
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1858,22 +2068,16 @@ def api_results():
     try:
         if not os.path.exists(RESULTS_PATH):
             return jsonify([])
-        with open(RESULTS_PATH, 'r', encoding='utf-8-sig') as f:
-            text = f.read()
-        lines = text.split('\n')
-        lines = [l for l in lines if l.strip()]
-        if len(lines) <= 1:
-            return jsonify([])
-        headers = [h.strip() for h in lines[0].split(',')]
-        rows = []
-        for line in lines[1:]:
-            vals = line.split(',')
-            obj = {}
-            for i, h in enumerate(headers):
-                val = vals[i] if i < len(vals) else ''
-                val = val.strip('"')
-                obj[h] = val
-            rows.append(obj)
+        with open(RESULTS_PATH, 'r', encoding='utf-8-sig', newline='') as f:
+            reader = csv.DictReader(f)
+            rows = []
+            for row in reader:
+                rows.append({
+                    'video_path': row.get('video_path', '') or '',
+                    'title': row.get('title', '') or '',
+                    'status': row.get('status', '') or '',
+                    'error': row.get('error', '') or '',
+                })
         return jsonify(rows)
     except Exception:
         return jsonify([])
