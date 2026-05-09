@@ -435,11 +435,39 @@ def _copy_app_bundle(src, dst):
     except Exception:
         return False
 
+def _clear_macos_quarantine(path):
+    if sys.platform != 'darwin' or not path or not os.path.exists(path):
+        return
+    try:
+        subprocess.run(
+            ['xattr', '-dr', 'com.apple.quarantine', path],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+def _extract_update_zip(file_path, dest_dir):
+    # Always validate member paths first to block zip-slip.
+    with zipfile.ZipFile(file_path, 'r') as zf:
+        validate_zip_members(zf, dest_dir)
+
+    if sys.platform == 'darwin':
+        # Preserve symlinks/resource forks inside .app bundles and embedded Chromium.app.
+        subprocess.run(['ditto', '-x', '-k', file_path, dest_dir], check=True)
+        _clear_macos_quarantine(dest_dir)
+        return
+
+    with zipfile.ZipFile(file_path, 'r') as zf:
+        safe_extract_zip(zf, dest_dir)
+
 def install_update_macos(new_app_path):
     new_app = _resolve_macos_app_bundle(new_app_path)
     cur_app = _get_current_macos_bundle()
     if not new_app:
         return ''
+    _clear_macos_quarantine(new_app)
     if not cur_app:
         return new_app
     parent = os.path.dirname(cur_app)
@@ -467,11 +495,36 @@ def install_update_macos(new_app_path):
             pass
         _rm_rf(tmp_new)
         return new_app
+    _clear_macos_quarantine(cur_app)
     _rm_rf(backup)
     return cur_app
 
+def _cleanup_update_artifacts(package_path='', extract_dir='', launched_target=''):
+    package_path = str(package_path or '').strip()
+    extract_dir = str(extract_dir or '').strip()
+    launched_target = os.path.realpath(launched_target) if launched_target else ''
 
-def _restart_app_process(open_target):
+    if package_path:
+        try:
+            if os.path.isfile(package_path):
+                os.remove(package_path)
+        except OSError:
+            pass
+
+    if not extract_dir:
+        return
+
+    try:
+        extract_real = os.path.realpath(extract_dir)
+        if launched_target and os.path.commonpath([extract_real, launched_target]) == extract_real:
+            return
+    except Exception:
+        pass
+
+    _rm_rf(extract_dir)
+
+
+def _restart_app_process(open_target, package_path='', extract_dir=''):
     try:
         target = open_target
         if sys.platform == 'darwin':
@@ -494,6 +547,7 @@ def _restart_app_process(open_target):
         return
 
     time.sleep(1.2)
+    _cleanup_update_artifacts(package_path, extract_dir, target)
     try:
         cleanup()
     except Exception:
@@ -514,6 +568,14 @@ def safe_extract_zip(zip_fp, dest_dir):
         if os.path.commonpath([dest_real, target_path]) != dest_real:
             raise ValueError('更新包包含非法路径，已拒绝解压')
         zip_fp.extract(member, dest_dir)
+
+def validate_zip_members(zip_fp, dest_dir):
+    dest_real = os.path.realpath(dest_dir)
+    for member in zip_fp.infolist():
+        member_name = member.filename.replace('\\', '/')
+        target_path = os.path.realpath(os.path.join(dest_dir, member_name))
+        if os.path.commonpath([dest_real, target_path]) != dest_real:
+            raise ValueError('更新包包含非法路径，已拒绝解压')
 
 
 def find_update_launch_target(root_dir):
@@ -547,8 +609,7 @@ def prepare_downloaded_update(file_path, version):
         if os.path.isdir(extract_dir):
             shutil.rmtree(extract_dir, ignore_errors=True)
         os.makedirs(extract_dir, exist_ok=True)
-        with zipfile.ZipFile(file_path, 'r') as zf:
-            safe_extract_zip(zf, extract_dir)
+        _extract_update_zip(file_path, extract_dir)
         return {
             'path': file_path,
             'extract_dir': extract_dir,
@@ -2134,12 +2195,17 @@ def _perform_update_download(info):
             message='更新已完成，正在重启应用...',
             error='',
             path=local_path,
+            extract_dir=prepared.get('extract_dir', ''),
             open_target=open_target,
             finished_at=datetime.now(timezone.utc).isoformat(),
             restart_ready=False,
             restarting=True,
         )
-        threading.Thread(target=_restart_app_process, args=(open_target,), daemon=True).start()
+        threading.Thread(
+            target=_restart_app_process,
+            args=(open_target, local_path, prepared.get('extract_dir', '')),
+            daemon=True,
+        ).start()
     except Exception as e:
         set_update_state(
             running=False,
@@ -2164,6 +2230,8 @@ def api_update_restart():
     try:
         state = get_update_state()
         open_target = str(state.get('open_target') or '').strip()
+        package_path = str(state.get('path') or '').strip()
+        extract_dir = str(state.get('extract_dir') or '').strip()
         if not open_target:
             return jsonify({'error': '新版本尚未准备完成'}), 400
         if state.get('restarting'):
@@ -2185,7 +2253,11 @@ def api_update_restart():
             restart_ready=False,
             restarting=True,
         )
-        threading.Thread(target=_restart_app_process, args=(open_target,), daemon=True).start()
+        threading.Thread(
+            target=_restart_app_process,
+            args=(open_target, package_path, extract_dir),
+            daemon=True,
+        ).start()
         return jsonify({
             'message': '正在重启应用',
             'state': get_update_state(),

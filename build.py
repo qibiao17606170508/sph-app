@@ -442,12 +442,16 @@ def make_release_archive(base, platform_name, version, target_path):
     base_name = os.path.basename(target_path)
     
     if platform_name == 'macos':
-        # Use ditto or zip -r -y on macOS to preserve symlinks (critical for Chromium.app)
-        log(f'[INFO] Creating zip archive using native zip to preserve symlinks...')
+        # Use ditto on macOS to preserve symlinks and Unicode filenames inside .app bundles.
+        log(f'[INFO] Creating zip archive using ditto to preserve bundle structure...')
         try:
-            subprocess.run(['zip', '-r', '-y', archive_path, base_name], cwd=root_dir, check=True)
+            subprocess.run(
+                ['ditto', '-c', '-k', '--keepParent', base_name, archive_path],
+                cwd=root_dir,
+                check=True,
+            )
         except Exception as e:
-            log(f'[ERROR] Native zip failed: {e}. Falling back to shutil (symlinks might break).')
+            log(f'[ERROR] ditto zip failed: {e}. Falling back to shutil (symlinks or filenames might break).')
             shutil.make_archive(archive_base, 'zip', root_dir=root_dir, base_dir=base_name)
     else:
         shutil.make_archive(archive_base, 'zip', root_dir=root_dir, base_dir=base_name)
