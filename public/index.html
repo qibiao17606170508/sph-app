@@ -246,16 +246,17 @@
               <div class="field">
                 <label>定时发表 <span class="field-optional">选填</span></label>
                 <input type="datetime-local" id="formTime" class="input" />
-                <span class="field-hint" style="color: var(--yellow); line-height: 1.6"> 如果间隔时间+定时时间大于视频上传时间，视频会立即上传。请确保设定时间在未来。</span>
+                <span class="field-hint" style="color: var(--yellow); line-height: 1.6; font-weight: bold">如果「定时时间」在未来5分钟以内,视频会立即上传。</span>
               </div>
               <div class="field">
                 <label>视频号剧集 <span class="field-optional">选填</span></label>
-                <input type="text" id="formDrama" class="input" placeholder="如：协议生四胎" />
+                <input type="text" id="formDrama" class="input" placeholder="如:霸道总裁爱上绝经的我" />
+                <span class="field-hint" style="color: var(--yellow); line-height: 1.6; font-weight: bold"> <span style="color: var(--red)">填写剧名</span>, 一定要填写准确，请检查空格</span>
               </div>
               <div class="field">
                 <label>间隔(分钟) <span class="field-optional">选填</span></label>
                 <input type="number" id="formInterval" class="input" min="0" max="1440" value="1" placeholder="0" />
-                <span class="field-hint">仅用于计算「定时发表」时刻。每条发表成功后将<strong>固定等待 5 秒</strong>开始下一条。服务端规则：仅当定时时刻距现在<strong>大于 本值+5 分钟</strong>才在微信里勾选定时，否则立即发表。</span>
+                <span class="field-hint" style="color: var(--yellow); line-height: 1.6; font-weight: bold">用于计算视频号「定时发表」的时间间隔。定时时间+间隔时间=实际发表时间。</span>
               </div>
             </div>
             <div class="form-actions">

@@ -541,6 +541,105 @@ def install_update_macos(new_app_path):
     _rm_rf(backup)
     return cur_app
 
+
+def _schedule_macos_update_install_and_launch(open_target, package_path='', extract_dir=''):
+    new_app = _resolve_macos_app_bundle(open_target) or str(open_target or '').strip()
+    cur_app = _get_current_macos_bundle()
+    if not new_app or not os.path.exists(new_app):
+        raise FileNotFoundError('未找到可安装的新版本应用')
+
+    script_fd, script_path = tempfile.mkstemp(prefix='wx-update-relaunch-', suffix='.sh')
+    old_pid = os.getpid()
+    quoted_new_app = shlex.quote(new_app)
+    quoted_cur_app = shlex.quote(cur_app)
+    quoted_package_path = shlex.quote(str(package_path or '').strip())
+    quoted_extract_dir = shlex.quote(str(extract_dir or '').strip())
+    quoted_script_path = shlex.quote(script_path)
+    script = f"""#!/bin/sh
+set -eu
+
+OLD_PID="{old_pid}"
+NEW_APP={quoted_new_app}
+CUR_APP={quoted_cur_app}
+PACKAGE_PATH={quoted_package_path}
+EXTRACT_DIR={quoted_extract_dir}
+SCRIPT_PATH={quoted_script_path}
+
+cleanup() {{
+  if [ -n "$PACKAGE_PATH" ] && [ -f "$PACKAGE_PATH" ]; then
+    rm -f "$PACKAGE_PATH" || true
+  fi
+  if [ -n "$EXTRACT_DIR" ] && [ -d "$EXTRACT_DIR" ]; then
+    rm -rf "$EXTRACT_DIR" || true
+  fi
+  rm -f "$SCRIPT_PATH" || true
+}}
+
+launch_app() {{
+  if open -n "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  APP_EXEC="$1/Contents/MacOS/$(basename "$1" .app)"
+  if [ -x "$APP_EXEC" ]; then
+    "$APP_EXEC" >/dev/null 2>&1 &
+    return 0
+  fi
+  return 1
+}}
+
+for _ in $(seq 1 120); do
+  if ! kill -0 "$OLD_PID" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+if [ -n "$CUR_APP" ] && [ "$CUR_APP" != "$NEW_APP" ]; then
+  TMP_NEW="${{CUR_APP}}.new"
+  BACKUP="${{CUR_APP}}.old"
+  rm -rf "$TMP_NEW" "$BACKUP" || true
+  ditto "$NEW_APP" "$TMP_NEW"
+  xattr -dr com.apple.quarantine "$TMP_NEW" >/dev/null 2>&1 || true
+  if [ -d "$CUR_APP" ]; then
+    mv "$CUR_APP" "$BACKUP"
+  fi
+  if mv "$TMP_NEW" "$CUR_APP"; then
+    rm -rf "$BACKUP" || true
+    xattr -dr com.apple.quarantine "$CUR_APP" >/dev/null 2>&1 || true
+    launch_app "$CUR_APP"
+  else
+    if [ -d "$BACKUP" ]; then
+      mv "$BACKUP" "$CUR_APP" || true
+    fi
+    exit 1
+  fi
+else
+  xattr -dr com.apple.quarantine "$NEW_APP" >/dev/null 2>&1 || true
+  launch_app "$NEW_APP"
+fi
+
+cleanup
+"""
+    try:
+        with os.fdopen(script_fd, 'w', encoding='utf-8') as f:
+            f.write(script)
+        os.chmod(script_path, 0o700)
+        subprocess.Popen(
+            ['/bin/sh', script_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        return True
+    except Exception:
+        try:
+            os.close(script_fd)
+        except Exception:
+            pass
+        _rm_rf(script_path)
+        raise
+
 def _cleanup_update_artifacts(package_path='', extract_dir='', launched_target=''):
     package_path = str(package_path or '').strip()
     extract_dir = str(extract_dir or '').strip()
@@ -573,10 +672,8 @@ def _restart_app_process(open_target, package_path='', extract_dir=''):
     try:
         target = open_target
         if sys.platform == 'darwin':
-            installed = install_update_macos(open_target)
-            if installed:
-                target = installed
-        if sys.platform in ('darwin', 'win32'):
+            _schedule_macos_update_install_and_launch(open_target, package_path, extract_dir)
+        elif sys.platform == 'win32':
             schedule_update_target_launch(target)
         else:
             launch_update_target(target)
@@ -594,10 +691,16 @@ def _restart_app_process(open_target, package_path='', extract_dir=''):
         )
         return
 
+    if sys.platform == 'darwin':
+        time.sleep(0.25)
+        try:
+            cleanup()
+        except Exception:
+            pass
+        os._exit(0)
+
     if sys.platform == 'win32':
         time.sleep(0.25)
-    elif sys.platform == 'darwin':
-        time.sleep(0.5)
     else:
         time.sleep(1.2)
     _cleanup_update_artifacts(package_path, extract_dir, target)
