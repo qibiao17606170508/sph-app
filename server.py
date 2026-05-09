@@ -12,6 +12,7 @@ import hashlib
 import os
 import random
 import re
+import shlex
 import shutil
 import ssl
 import string
@@ -383,9 +384,50 @@ def launch_update_target(file_path):
         os.startfile(file_path)
         return
     if sys.platform == 'darwin':
-        subprocess.Popen(['open', file_path])
+        target = _resolve_macos_app_bundle(file_path) or file_path
+        cmd = ['open', '-n', target] if str(target).endswith('.app') else ['open', file_path]
+        subprocess.Popen(cmd)
         return
     subprocess.Popen(['xdg-open', file_path])
+
+
+def schedule_update_target_launch(file_path):
+    target = str(file_path or '').strip()
+    if not target:
+        raise ValueError('缺少启动目标')
+
+    if sys.platform == 'win32':
+        # Delay relaunch until the current process has exited, otherwise the new app
+        # may fail to bind its local server/port and appear to "flash" then exit.
+        start_cmd = f'ping 127.0.0.1 -n 3 >nul && start "" "{target}"'
+        creationflags = 0
+        for flag_name in ('CREATE_NEW_PROCESS_GROUP', 'DETACHED_PROCESS', 'CREATE_NO_WINDOW'):
+            creationflags |= int(getattr(subprocess, flag_name, 0) or 0)
+        subprocess.Popen(
+            ['cmd', '/c', start_cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+            close_fds=True,
+        )
+        return
+
+    if sys.platform == 'darwin':
+        target = _resolve_macos_app_bundle(target) or target
+        if str(target).endswith('.app'):
+            open_cmd = f'open -n {shlex.quote(target)}'
+        else:
+            open_cmd = f'open {shlex.quote(target)}'
+        subprocess.Popen(
+            ['/bin/sh', '-c', f'sleep 1; {open_cmd} >/dev/null 2>&1'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        return
+
+    launch_update_target(target)
 
 def _resolve_macos_app_bundle(path):
     p = os.path.realpath(path)
@@ -506,7 +548,10 @@ def _cleanup_update_artifacts(package_path='', extract_dir='', launched_target='
 
     if package_path:
         try:
-            if os.path.isfile(package_path):
+            package_real = os.path.realpath(package_path)
+            if launched_target and package_real == launched_target:
+                package_path = ''
+            elif os.path.isfile(package_path):
                 os.remove(package_path)
         except OSError:
             pass
@@ -531,7 +576,10 @@ def _restart_app_process(open_target, package_path='', extract_dir=''):
             installed = install_update_macos(open_target)
             if installed:
                 target = installed
-        launch_update_target(target)
+        if sys.platform in ('darwin', 'win32'):
+            schedule_update_target_launch(target)
+        else:
+            launch_update_target(target)
     except Exception as e:
         set_update_state(
             running=False,
@@ -546,7 +594,12 @@ def _restart_app_process(open_target, package_path='', extract_dir=''):
         )
         return
 
-    time.sleep(1.2)
+    if sys.platform == 'win32':
+        time.sleep(0.25)
+    elif sys.platform == 'darwin':
+        time.sleep(0.5)
+    else:
+        time.sleep(1.2)
     _cleanup_update_artifacts(package_path, extract_dir, target)
     try:
         cleanup()

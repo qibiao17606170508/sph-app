@@ -49,8 +49,10 @@ async function api(url, opts = {}) {
   delete fetchOptions.skipAuthRedirect;
   const res = await fetch(url, fetchOptions);
   if (res.status === 401) {
-    if (!skipAuthRedirect) handleUnauthorized();
-    throw new Error("UNAUTHORIZED");
+    if (!skipAuthRedirect) {
+      handleUnauthorized();
+      throw new Error("UNAUTHORIZED");
+    }
   }
   return res;
 }
@@ -447,11 +449,13 @@ async function pollUpdateStatus() {
   }
 }
 
-function promptOptionalUpdate(info) {
+function promptOptionalUpdate(info, options = {}) {
+  const { force = false } = options;
   optionalUpdateInfo = info || null;
   if (!info || !info.available || info.required) return;
   const promptKey = getOptionalUpdatePromptKey(info);
-  if (!promptKey || promptKey === lastOptionalUpdatePromptKey) return;
+  if (!promptKey) return;
+  if (!force && promptKey === lastOptionalUpdatePromptKey) return;
   lastOptionalUpdatePromptKey = promptKey;
   const notes = esc(info.notes || "发现新版本，建议及时更新。").replace(/\n/g, "<br>");
   const body = `检测到新版本 <strong>v${esc(info.latest_version || "-")}</strong>。<br>` + `当前版本: v${esc(info.current_version || currentVersion || "-")}<br><br>` + notes + "<br><br>是否现在更新？";
@@ -557,7 +561,7 @@ if ($("checkUpdateBtn")) {
       if (state && state.blocked) {
         // 已触发强更弹窗
       } else if (state && state.info && state.info.available) {
-        promptOptionalUpdate(state.info);
+        promptOptionalUpdate(state.info, { force: true });
       } else if (state && state.info && state.info.message) {
         toast(state.info.message, "error");
       } else {
