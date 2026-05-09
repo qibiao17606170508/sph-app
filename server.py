@@ -669,6 +669,7 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     current_dir = os.path.dirname(current_exe)
     new_dir = os.path.dirname(new_exe)
     old_pid = os.getpid()
+    log_path = os.path.join(current_dir or tempfile.gettempdir(), 'update-helper.log')
 
     script_fd, script_path = tempfile.mkstemp(prefix='wx-update-relaunch-', suffix='.ps1')
     quoted_new_dir = _powershell_single_quote(new_dir)
@@ -677,6 +678,7 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     quoted_package_path = _powershell_single_quote(os.path.normpath(str(package_path or '').strip()))
     quoted_extract_dir = _powershell_single_quote(os.path.normpath(str(extract_dir or '').strip()))
     quoted_script_path = _powershell_single_quote(script_path)
+    quoted_log_path = _powershell_single_quote(log_path)
     script = f"""$ErrorActionPreference = 'Stop'
 $oldPid = {old_pid}
 $newDir = {quoted_new_dir}
@@ -685,9 +687,20 @@ $currentExe = {quoted_current_exe}
 $packagePath = {quoted_package_path}
 $extractDir = {quoted_extract_dir}
 $scriptPath = {quoted_script_path}
+$logPath = {quoted_log_path}
+
+function Write-UpdateLog($message) {{
+  try {{
+    Add-Content -LiteralPath $logPath -Value ("[" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "] " + $message)
+  }} catch {{
+  }}
+}}
+
+Write-UpdateLog "helper start: currentDir=$currentDir ; newDir=$newDir ; currentExe=$currentExe"
 
 for ($i = 0; $i -lt 120; $i++) {{
   if (-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {{
+    Write-UpdateLog "old process exited"
     break
   }}
   Start-Sleep -Seconds 1
@@ -695,24 +708,52 @@ for ($i = 0; $i -lt 120; $i++) {{
 
 if (-not (Test-Path -LiteralPath $currentDir)) {{
   New-Item -ItemType Directory -Path $currentDir -Force | Out-Null
+  Write-UpdateLog "created currentDir: $currentDir"
 }}
 
 if ((Test-Path -LiteralPath $newDir) -and ($newDir -ne $currentDir)) {{
-  $null = robocopy $newDir $currentDir /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
-  if ($LASTEXITCODE -ge 8) {{
-    throw "robocopy failed with exit code $LASTEXITCODE"
+  $backupDir = "$currentDir.old"
+  if (Test-Path -LiteralPath $backupDir) {{
+    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-UpdateLog "removed stale backup dir: $backupDir"
+  }}
+  if (Test-Path -LiteralPath $currentDir) {{
+    Move-Item -LiteralPath $currentDir -Destination $backupDir -Force
+    Write-UpdateLog "moved current dir to backup: $backupDir"
+  }}
+  try {{
+    Move-Item -LiteralPath $newDir -Destination $currentDir -Force
+    Write-UpdateLog "moved new dir into place"
+  }} catch {{
+    Write-UpdateLog ("move new dir failed: " + $_.Exception.Message)
+    if ((-not (Test-Path -LiteralPath $currentDir)) -and (Test-Path -LiteralPath $backupDir)) {{
+      Move-Item -LiteralPath $backupDir -Destination $currentDir -Force -ErrorAction SilentlyContinue
+      Write-UpdateLog "restored backup dir"
+    }}
+    throw
+  }}
+  if (Test-Path -LiteralPath $backupDir) {{
+    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-UpdateLog "removed backup dir"
   }}
 }}
 
 Start-Sleep -Milliseconds 400
-Start-Process -FilePath $currentExe -WorkingDirectory $currentDir
+$installedExe = Join-Path $currentDir (Split-Path $currentExe -Leaf)
+if (-not (Test-Path -LiteralPath $installedExe)) {{
+  throw "installed exe missing: $installedExe"
+}}
+Write-UpdateLog "starting installed exe: $installedExe"
+Start-Process -FilePath $installedExe -WorkingDirectory $currentDir
 
 Start-Sleep -Seconds 2
 if ($packagePath -and (Test-Path -LiteralPath $packagePath)) {{
   Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+  Write-UpdateLog "removed package: $packagePath"
 }}
 if ($extractDir -and (Test-Path -LiteralPath $extractDir)) {{
   Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+  Write-UpdateLog "removed extract dir: $extractDir"
 }}
 if (Test-Path -LiteralPath $scriptPath) {{
   Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
