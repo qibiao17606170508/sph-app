@@ -211,20 +211,37 @@ def render_index_html():
     remembered_password = html_lib.escape(str(remembered.get('p') or ''), quote=True)
     remember_checked = ' checked' if remembered_username and remembered_password else ''
 
-    html_text = html_text.replace(
-        '<input id="loginUsername" class="input auth-input" type="text" placeholder="请输入账号" autocomplete="username" />',
-        f'<input id="loginUsername" class="input auth-input" type="text" placeholder="请输入账号" autocomplete="username" value="{remembered_username}" />',
-        1,
+    def _replace_input_value(match, value):
+        tag = match.group(0)
+        tag = re.sub(r'\svalue="[^"]*"', '', tag, count=1)
+        if value:
+            tag = tag[:-2] + f' value="{value}" />'
+        return tag
+
+    def _replace_checkbox_checked(match, checked):
+        tag = match.group(0)
+        tag = re.sub(r'\schecked\b', '', tag, count=1)
+        if checked:
+            tag = tag[:-2] + ' checked />'
+        return tag
+
+    html_text = re.sub(
+        r'<input\b[^>]*id="loginUsername"[^>]*/>',
+        lambda m: _replace_input_value(m, remembered_username),
+        html_text,
+        count=1,
     )
-    html_text = html_text.replace(
-        '<input id="loginPassword" class="input auth-input" type="password" placeholder="请输入密码" autocomplete="current-password" />',
-        f'<input id="loginPassword" class="input auth-input" type="password" placeholder="请输入密码" autocomplete="current-password" value="{remembered_password}" />',
-        1,
+    html_text = re.sub(
+        r'<input\b[^>]*id="loginPassword"[^>]*/>',
+        lambda m: _replace_input_value(m, remembered_password),
+        html_text,
+        count=1,
     )
-    html_text = html_text.replace(
-        '<input type="checkbox" id="rememberMe" style="width: 16px; height: 16px; cursor: pointer" />',
-        f'<input type="checkbox" id="rememberMe" style="width: 16px; height: 16px; cursor: pointer"{remember_checked} />',
-        1,
+    html_text = re.sub(
+        r'<input\b[^>]*id="rememberMe"[^>]*/>',
+        lambda m: _replace_checkbox_checked(m, bool(remember_checked)),
+        html_text,
+        count=1,
     )
 
     bootstrap = {
@@ -232,7 +249,9 @@ def render_index_html():
     }
     bootstrap_json = json.dumps(bootstrap, ensure_ascii=False).replace('</', '<\\/')
     injected = f'<script>window.__APP_BOOTSTRAP__ = {bootstrap_json};</script>'
-    if '</body>' in html_text:
+    if '<script src="/app.js"></script>' in html_text:
+        html_text = html_text.replace('<script src="/app.js"></script>', f'{injected}\n    <script src="/app.js"></script>', 1)
+    elif '</body>' in html_text:
         html_text = html_text.replace('</body>', f'  {injected}\n  </body>', 1)
     else:
         html_text += injected
