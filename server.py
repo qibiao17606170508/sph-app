@@ -785,12 +785,12 @@ try {
     $installOk = $false
     Write-UpdateLog "starting robocopy update..."
     for ($attempt = 1; $attempt -le 30; $attempt++) {
-      # 使用 & 符号调用外部命令，并确保路径变量被正确引用
-      # 注意：Robocopy 排除参数在 Python 侧已处理为双引号
+      # 使用数组拼出原生命令参数，避免中文路径和 /XD /XF 在脚本解析阶段出错
       $robocopyArgs = @($newDir, $currentDir, "/MIR", "/R:0", "/W:0", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
-      # 追加排除参数
-      $robocopyArgs += __ROBOCOPY_XD__
-      $robocopyArgs += __ROBOCOPY_XF__
+      $robocopyArgs += '/XD'
+      $robocopyArgs += __KEEP_DIRS__
+      $robocopyArgs += '/XF'
+      $robocopyArgs += __KEEP_FILES__
       
       & robocopy $robocopyArgs
       $copyCode = $LASTEXITCODE
@@ -849,9 +849,9 @@ if (Test-Path -LiteralPath $scriptPath) {
   Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
 }
 """
-    # 处理排除参数列表
-    xd_list = '@(' + ', '.join(_powershell_single_quote(os.path.join(current_dir, name)) for name in keep_dirs) + ')'
-    xf_list = '@(' + ', '.join(_powershell_single_quote(name) for name in keep_files) + ')'
+    # 处理 PowerShell 数组字面量，避免把 /XD、/XF 直接替换成非法脚本片段
+    keep_dirs_ps = '@(' + ', '.join(_powershell_single_quote(os.path.join(current_dir, name)) for name in keep_dirs) + ')'
+    keep_files_ps = '@(' + ', '.join(_powershell_single_quote(name) for name in keep_files) + ')'
 
     script = (
         script
@@ -863,13 +863,18 @@ if (Test-Path -LiteralPath $scriptPath) {
         .replace('__EXTRACT_DIR__', quoted_extract_dir)
         .replace('__SCRIPT_PATH__', quoted_script_path)
         .replace('__LOG_PATH__', quoted_log_path)
-        .replace('__ROBOCOPY_XD__', f"/XD {xd_list}")
-        .replace('__ROBOCOPY_XF__', f"/XF {xf_list}")
+        .replace('__KEEP_DIRS__', keep_dirs_ps)
+        .replace('__KEEP_FILES__', keep_files_ps)
     )
     try:
         # 使用 utf-8-sig 编码，这会在文件开头添加 BOM，是 PowerShell 5.1 正确识别 UTF-8 的关键
         with os.fdopen(script_fd, 'w', encoding='utf-8-sig') as f:
             f.write(script)
+        try:
+            with open(os.path.join(helper_log_root, 'update-helper.last.ps1'), 'w', encoding='utf-8-sig') as f:
+                f.write(script)
+        except Exception:
+            pass
         
         # 准备启动参数
         powershell_exe = 'powershell.exe'
