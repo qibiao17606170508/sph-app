@@ -7,6 +7,7 @@ Translated from server.js
 
 import asyncio
 import csv
+import html as html_lib
 import json
 import hashlib
 import os
@@ -201,20 +202,41 @@ def render_index_html():
     index_path = os.path.join(public_dir, 'index.html')
     try:
         with open(index_path, 'r', encoding='utf-8') as f:
-            html = f.read()
+            html_text = f.read()
     except Exception:
         return send_from_directory(public_dir, 'index.html')
 
+    remembered = load_remembered_credentials() or {}
+    remembered_username = html_lib.escape(str(remembered.get('u') or ''), quote=True)
+    remembered_password = html_lib.escape(str(remembered.get('p') or ''), quote=True)
+    remember_checked = ' checked' if remembered_username and remembered_password else ''
+
+    html_text = html_text.replace(
+        '<input id="loginUsername" class="input auth-input" type="text" placeholder="请输入账号" autocomplete="username" />',
+        f'<input id="loginUsername" class="input auth-input" type="text" placeholder="请输入账号" autocomplete="username" value="{remembered_username}" />',
+        1,
+    )
+    html_text = html_text.replace(
+        '<input id="loginPassword" class="input auth-input" type="password" placeholder="请输入密码" autocomplete="current-password" />',
+        f'<input id="loginPassword" class="input auth-input" type="password" placeholder="请输入密码" autocomplete="current-password" value="{remembered_password}" />',
+        1,
+    )
+    html_text = html_text.replace(
+        '<input type="checkbox" id="rememberMe" style="width: 16px; height: 16px; cursor: pointer" />',
+        f'<input type="checkbox" id="rememberMe" style="width: 16px; height: 16px; cursor: pointer"{remember_checked} />',
+        1,
+    )
+
     bootstrap = {
-        'rememberedLogin': load_remembered_credentials() or None,
+        'rememberedLogin': remembered or None,
     }
     bootstrap_json = json.dumps(bootstrap, ensure_ascii=False).replace('</', '<\\/')
     injected = f'<script>window.__APP_BOOTSTRAP__ = {bootstrap_json};</script>'
-    if '</body>' in html:
-        html = html.replace('</body>', f'  {injected}\n  </body>', 1)
+    if '</body>' in html_text:
+        html_text = html_text.replace('</body>', f'  {injected}\n  </body>', 1)
     else:
-        html += injected
-    return app.response_class(html, mimetype='text/html')
+        html_text += injected
+    return app.response_class(html_text, mimetype='text/html')
 
 
 def save_remembered_credentials(username, password):
@@ -933,17 +955,31 @@ if (Test-Path -LiteralPath $scriptPath) {
             '-File',
             script_path,
         ]
-        
+        command_line = subprocess.list2cmdline(args)
+        vbs_fd, vbs_path = tempfile.mkstemp(prefix='wx-update-relaunch-', suffix='.vbs')
+        vbs_script = (
+            'Set WshShell = CreateObject("WScript.Shell")\r\n'
+            f'WshShell.Run "{command_line.replace(chr(34), chr(34) * 2)}", 0, False\r\n'
+        )
+        with os.fdopen(vbs_fd, 'w', encoding='utf-8') as f:
+            f.write(vbs_script)
+        try:
+            with open(os.path.join(helper_log_root, 'update-helper.last.vbs'), 'w', encoding='utf-8') as f:
+                f.write(vbs_script)
+        except Exception:
+            pass
+
         creationflags = 0
-        # CREATE_NO_WINDOW 确保不会弹出黑框，DETACHED_PROCESS 允许父进程退出后继续运行
-        for flag_name in ('CREATE_NEW_PROCESS_GROUP', 'DETACHED_PROCESS', 'CREATE_NO_WINDOW'):
+        # CREATE_BREAKAWAY_FROM_JOB 可避免父进程退出时，辅助更新进程被一并终止
+        for flag_name in ('CREATE_NEW_PROCESS_GROUP', 'DETACHED_PROCESS', 'CREATE_NO_WINDOW', 'CREATE_BREAKAWAY_FROM_JOB'):
             creationflags |= int(getattr(subprocess, flag_name, 0) or 0)
-        
+
         with open(log_path, 'a', encoding='utf-8') as f:
-            f.write(f'[{datetime.now()}] starting powershell update helper: {" ".join(args)}\n')
-            
+            f.write(f'[{datetime.now()}] starting powershell update helper: {command_line}\n')
+            f.write(f'[{datetime.now()}] helper launch wrapper: wscript.exe //B //Nologo {vbs_path}\n')
+
         helper_proc = subprocess.Popen(
-            args,
+            ['wscript.exe', '//B', '//Nologo', vbs_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
@@ -952,7 +988,7 @@ if (Test-Path -LiteralPath $scriptPath) {
         )
         try:
             with open(log_path, 'a', encoding='utf-8') as f:
-                f.write(f'[{datetime.now()}] powershell helper pid: {helper_proc.pid}\n')
+                f.write(f'[{datetime.now()}] update wrapper pid: {helper_proc.pid}\n')
         except Exception:
             pass
         return current_exe
@@ -963,7 +999,14 @@ if (Test-Path -LiteralPath $scriptPath) {
             os.close(script_fd)
         except Exception:
             pass
+        try:
+            if 'vbs_fd' in locals():
+                os.close(vbs_fd)
+        except Exception:
+            pass
         _rm_rf(script_path)
+        if 'vbs_path' in locals():
+            _rm_rf(vbs_path)
         raise
 
 def _cleanup_update_artifacts(package_path='', extract_dir='', launched_target=''):
