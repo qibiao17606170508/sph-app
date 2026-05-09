@@ -684,8 +684,9 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
         pass
     keep_dirs = ['uploads', 'screenshots', 'browser-profiles', 'downloads', 'webview-storage', 'data']
     keep_files = ['accounts.json', 'accounts.json.bak', 'results.csv', 'upload.log', 'app.log', 'last-batch.csv']
-    keep_dirs_args = ' '.join(_powershell_single_quote(os.path.join(current_dir, name)) for name in keep_dirs)
-    keep_files_args = ' '.join(_powershell_single_quote(name) for name in keep_files)
+    # Robocopy 排除参数需要双引号，因为单引号在传递给外部 EXE 时可能被视为路径的一部分
+    keep_dirs_args = ' '.join(f'"{os.path.join(current_dir, name)}"' for name in keep_dirs)
+    keep_files_args = ' '.join(f'"{name}"' for name in keep_files)
 
     script_fd, script_path = tempfile.mkstemp(prefix='wx-update-relaunch-', suffix='.ps1')
     quoted_new_dir = _powershell_single_quote(new_dir)
@@ -697,6 +698,7 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     quoted_log_path = _powershell_single_quote(log_path)
     # 使用 utf-8-sig 编码写入脚本，确保 PowerShell 5.1 能正确识别中文路径
     script = """$ErrorActionPreference = 'Stop'
+$script:logPath = __LOG_PATH__
 $oldPid = __OLD_PID__
 $newDir = __NEW_DIR__
 $currentDir = __CURRENT_DIR__
@@ -704,18 +706,17 @@ $currentExe = __CURRENT_EXE__
 $packagePath = __PACKAGE_PATH__
 $extractDir = __EXTRACT_DIR__
 $scriptPath = __SCRIPT_PATH__
-$logPath = __LOG_PATH__
 $safeWorkingDir = [System.IO.Path]::GetTempPath()
 
-function Write-UpdateLog($message) {
+function Write-UpdateLog {
+  param([string]$message)
   try {
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[$ts] [PowerShell] $message" | Out-File -FilePath $logPath -Append -Encoding utf8
-  } catch {
-  }
+    Add-Content -LiteralPath $script:logPath -Value "[$ts] [PowerShell] $message" -Encoding utf8
+  } catch {}
 }
 
-Write-UpdateLog "helper start: currentDir=$currentDir ; newDir=$newDir ; currentExe=$currentExe"
+Write-UpdateLog "helper start: currentDir=$currentDir ; newDir=$newDir"
 try {
   Set-Location -LiteralPath $safeWorkingDir
   Write-UpdateLog "switched working dir to: $safeWorkingDir"
@@ -733,7 +734,7 @@ for ($i = 0; $i -lt 60; $i++) {
   Start-Sleep -Seconds 1
 }
 
-# 兜底：如果进程还在，尝试停止它（仅限主进程）
+# 兜底：如果进程还在，尝试停止它
 if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
   Write-UpdateLog "old process still alive, attempting to stop..."
   Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
@@ -748,13 +749,18 @@ if (-not (Test-Path -LiteralPath $newDir)) {
 try {
   if ($newDir -ne $currentDir) {
     $installOk = $false
-    Write-UpdateLog "starting robocopy from $newDir to $currentDir"
+    Write-UpdateLog "starting robocopy update..."
     for ($attempt = 1; $attempt -le 30; $attempt++) {
-      # 使用 robocopy 同步文件，排除数据目录和日志
-      $null = robocopy $newDir $currentDir __ROBOCOPY_OPTS__
+      # 使用 & 符号调用外部命令，并确保路径变量被正确引用
+      # 注意：Robocopy 排除参数在 Python 侧已处理为双引号
+      $robocopyArgs = @($newDir, $currentDir, "/MIR", "/R:0", "/W:0", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
+      # 追加排除参数
+      $robocopyArgs += __ROBOCOPY_XD__
+      $robocopyArgs += __ROBOCOPY_XF__
+      
+      & robocopy $robocopyArgs
       $copyCode = $LASTEXITCODE
-      Write-UpdateLog ("robocopy attempt " + $attempt + " exit code: " + $copyCode)
-      # robocopy 退出码 < 8 表示成功或仅有部分文件已存在/跳过
+      Write-UpdateLog "robocopy attempt $attempt exit code: $copyCode"
       if ($copyCode -lt 8) {
         $installOk = $true
         break
@@ -764,69 +770,55 @@ try {
     if (-not $installOk) {
       throw "robocopy failed after retries (exit code $copyCode)"
     }
-    Write-UpdateLog "robocopy install finished"
   }
 
-  Start-Sleep -Milliseconds 500
   $exeName = Split-Path $currentExe -Leaf
   $sourceExe = Join-Path $newDir $exeName
   $installedExe = Join-Path $currentDir $exeName
   
-  # 确保主程序已更新
   if (Test-Path -LiteralPath $sourceExe) {
-    Write-UpdateLog "ensuring main exe is updated: $installedExe"
+    Write-UpdateLog "ensuring main exe is updated"
     Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force -ErrorAction SilentlyContinue
   }
 
-  # 处理 _internal 目录（如果是 PyInstaller 打包）
   $sourceInternal = Join-Path $newDir '_internal'
   $targetInternal = Join-Path $currentDir '_internal'
   if (Test-Path -LiteralPath $sourceInternal) {
-    Write-UpdateLog "updating _internal directory..."
+    Write-UpdateLog "updating _internal..."
     $internalOk = $false
     for ($attempt = 1; $attempt -le 10; $attempt++) {
-      $null = robocopy $sourceInternal $targetInternal /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP
-      if ($LASTEXITCODE -lt 8) {
-        $internalOk = $true
-        break
-      }
+      & robocopy $sourceInternal $targetInternal /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP
+      if ($LASTEXITCODE -lt 8) { $internalOk = $true; break }
       Start-Sleep -Milliseconds 500
     }
-    if (-not $internalOk) {
-      Write-UpdateLog "warning: _internal update partially failed"
-    }
-  }
-
-  if (-not (Test-Path -LiteralPath $installedExe)) {
-    throw "installed exe missing: $installedExe"
   }
 
   Write-UpdateLog "launching new version: $installedExe"
   Start-Process -FilePath $installedExe -WorkingDirectory $currentDir
-  Write-UpdateLog "new version launched, helper exiting."
+  Write-UpdateLog "success, helper exiting"
 } catch {
   Write-UpdateLog ("CRITICAL ERROR: " + $_.Exception.Message)
-  # 发生致命错误时尝试重新启动原程序，避免程序完全消失
   if (Test-Path -LiteralPath $currentExe) {
-    Write-UpdateLog "attempting to restart current exe after failure..."
+    Write-UpdateLog "restarting current version as fallback..."
     Start-Process -FilePath $currentExe -WorkingDirectory $currentDir
   }
-  throw
 }
 
 Start-Sleep -Seconds 5
-# 清理临时文件
-if ($packagePath -and (Test-Path -LiteralPath $packagePath)) {
+if ($packagePath -and (Test-Path -LiteralPath $packagePath) -and ($packagePath -ne $currentDir)) {
   Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
 }
-if ($extractDir -and (Test-Path -LiteralPath $extractDir)) {
+if ($extractDir -and (Test-Path -LiteralPath $extractDir) -and ($extractDir -ne $currentDir)) {
   Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-# 脚本自删除
 if (Test-Path -LiteralPath $scriptPath) {
   Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
 }
 """
+    # 处理排除参数列表
+    xd_list = '@(' + ', '.join(_powershell_single_quote(os.path.join(current_dir, name)) for name in keep_dirs) + ')'
+    xf_list = '@(' + ', '.join(_powershell_single_quote(name) for name in keep_files) + ')'
+
     script = (
         script
         .replace('__OLD_PID__', str(old_pid))
@@ -835,9 +827,9 @@ if (Test-Path -LiteralPath $scriptPath) {
         .replace('__CURRENT_EXE__', quoted_current_exe)
         .replace('__PACKAGE_PATH__', quoted_package_path)
         .replace('__EXTRACT_DIR__', quoted_extract_dir)
-        .replace('__SCRIPT_PATH__', quoted_script_path)
         .replace('__LOG_PATH__', quoted_log_path)
-        .replace('__ROBOCOPY_OPTS__', f"/MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP /XD {keep_dirs_args} /XF {keep_files_args}")
+        .replace('__ROBOCOPY_XD__', f"/XD {xd_list}")
+        .replace('__ROBOCOPY_XF__', f"/XF {xf_list}")
     )
     try:
         # 使用 utf-8-sig 编码，这会在文件开头添加 BOM，是 PowerShell 5.1 正确识别 UTF-8 的关键
