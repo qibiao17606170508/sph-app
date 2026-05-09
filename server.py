@@ -669,7 +669,9 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     current_dir = os.path.dirname(current_exe)
     new_dir = os.path.dirname(new_exe)
     old_pid = os.getpid()
-    log_path = os.path.join(current_dir or tempfile.gettempdir(), 'update-helper.log')
+    helper_log_root = BASE_DIR or tempfile.gettempdir()
+    os.makedirs(helper_log_root, exist_ok=True)
+    log_path = os.path.join(helper_log_root, 'update-helper.log')
 
     script_fd, script_path = tempfile.mkstemp(prefix='wx-update-relaunch-', suffix='.ps1')
     quoted_new_dir = _powershell_single_quote(new_dir)
@@ -679,15 +681,16 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     quoted_extract_dir = _powershell_single_quote(os.path.normpath(str(extract_dir or '').strip()))
     quoted_script_path = _powershell_single_quote(script_path)
     quoted_log_path = _powershell_single_quote(log_path)
-    script = f"""$ErrorActionPreference = 'Stop'
-$oldPid = {old_pid}
-$newDir = {quoted_new_dir}
-$currentDir = {quoted_current_dir}
-$currentExe = {quoted_current_exe}
-$packagePath = {quoted_package_path}
-$extractDir = {quoted_extract_dir}
-$scriptPath = {quoted_script_path}
-$logPath = {quoted_log_path}
+    script = """$ErrorActionPreference = 'Stop'
+$oldPid = __OLD_PID__
+$newDir = __NEW_DIR__
+$currentDir = __CURRENT_DIR__
+$currentExe = __CURRENT_EXE__
+$packagePath = __PACKAGE_PATH__
+$extractDir = __EXTRACT_DIR__
+$scriptPath = __SCRIPT_PATH__
+$logPath = __LOG_PATH__
+$safeWorkingDir = [System.IO.Path]::GetTempPath()
 
 function Write-UpdateLog($message) {{
   try {{
@@ -697,6 +700,12 @@ function Write-UpdateLog($message) {{
 }}
 
 Write-UpdateLog "helper start: currentDir=$currentDir ; newDir=$newDir ; currentExe=$currentExe"
+try {{
+  Set-Location -LiteralPath $safeWorkingDir
+  Write-UpdateLog "switched working dir to: $safeWorkingDir"
+}} catch {{
+  Write-UpdateLog ("switch working dir failed: " + $_.Exception.Message)
+}}
 
 for ($i = 0; $i -lt 120; $i++) {{
   if (-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {{
@@ -711,36 +720,42 @@ if (-not (Test-Path -LiteralPath $currentDir)) {{
   Write-UpdateLog "created currentDir: $currentDir"
 }}
 
-if ((Test-Path -LiteralPath $newDir) -and ($newDir -ne $currentDir)) {{
-  $backupDir = "$currentDir.old"
-  if (Test-Path -LiteralPath $backupDir) {{
-    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-UpdateLog "removed stale backup dir: $backupDir"
-  }}
-  if (Test-Path -LiteralPath $currentDir) {{
-    Move-Item -LiteralPath $currentDir -Destination $backupDir -Force
-    Write-UpdateLog "moved current dir to backup: $backupDir"
-  }}
-  try {{
-    Move-Item -LiteralPath $newDir -Destination $currentDir -Force
-    Write-UpdateLog "moved new dir into place"
-  }} catch {{
-    Write-UpdateLog ("move new dir failed: " + $_.Exception.Message)
-    if ((-not (Test-Path -LiteralPath $currentDir)) -and (Test-Path -LiteralPath $backupDir)) {{
-      Move-Item -LiteralPath $backupDir -Destination $currentDir -Force -ErrorAction SilentlyContinue
-      Write-UpdateLog "restored backup dir"
+try {{
+  if ((Test-Path -LiteralPath $newDir) -and ($newDir -ne $currentDir)) {{
+    $backupDir = "$currentDir.old"
+    if (Test-Path -LiteralPath $backupDir) {{
+      Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+      Write-UpdateLog "removed stale backup dir: $backupDir"
     }}
-    throw
+    if (Test-Path -LiteralPath $currentDir) {{
+      Move-Item -LiteralPath $currentDir -Destination $backupDir -Force
+      Write-UpdateLog "moved current dir to backup: $backupDir"
+    }}
+    try {{
+      Move-Item -LiteralPath $newDir -Destination $currentDir -Force
+      Write-UpdateLog "moved new dir into place"
+    }} catch {{
+      Write-UpdateLog ("move new dir failed: " + $_.Exception.Message)
+      if ((-not (Test-Path -LiteralPath $currentDir)) -and (Test-Path -LiteralPath $backupDir)) {{
+        Move-Item -LiteralPath $backupDir -Destination $currentDir -Force -ErrorAction SilentlyContinue
+        Write-UpdateLog "restored backup dir"
+      }}
+      throw
+    }}
+    if (Test-Path -LiteralPath $backupDir) {{
+      Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+      Write-UpdateLog "removed backup dir"
+    }}
   }}
-  if (Test-Path -LiteralPath $backupDir) {{
-    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-UpdateLog "removed backup dir"
-  }}
+}} catch {{
+  Write-UpdateLog ("install step failed: " + $_.Exception.Message)
+  throw
 }}
 
 Start-Sleep -Milliseconds 400
 $installedExe = Join-Path $currentDir (Split-Path $currentExe -Leaf)
 if (-not (Test-Path -LiteralPath $installedExe)) {{
+  Write-UpdateLog "installed exe missing after move"
   throw "installed exe missing: $installedExe"
 }}
 Write-UpdateLog "starting installed exe: $installedExe"
@@ -759,6 +774,17 @@ if (Test-Path -LiteralPath $scriptPath) {{
   Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
 }}
 """
+    script = (
+        script
+        .replace('__OLD_PID__', str(old_pid))
+        .replace('__NEW_DIR__', quoted_new_dir)
+        .replace('__CURRENT_DIR__', quoted_current_dir)
+        .replace('__CURRENT_EXE__', quoted_current_exe)
+        .replace('__PACKAGE_PATH__', quoted_package_path)
+        .replace('__EXTRACT_DIR__', quoted_extract_dir)
+        .replace('__SCRIPT_PATH__', quoted_script_path)
+        .replace('__LOG_PATH__', quoted_log_path)
+    )
     try:
         with os.fdopen(script_fd, 'w', encoding='utf-8') as f:
             f.write(script)
