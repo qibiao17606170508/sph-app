@@ -4876,6 +4876,18 @@ async def batch_upload(browser_context, records, options=None):
     abort_signal = options.get('abortSignal')
     on_progress = options.get('onProgress')
     on_login_expired = options.get('onLoginExpired')
+    restart_context = options.get('restartContext')
+
+    def _is_context_closed_error(err):
+        msg = str(err or '')
+        if not msg:
+            return False
+        return (
+            'Target page, context or browser has been closed' in msg
+            or 'BrowserContext.new_page' in msg
+            or 'Browser has been closed' in msg
+            or 'browser has been closed' in msg
+        )
 
     history_results = [] if resume else load_existing_results(results_path)
     results = list(existing_results)
@@ -4889,7 +4901,16 @@ async def batch_upload(browser_context, records, options=None):
     # 过滤掉已关闭的页面
     live = [p for p in browser_context.pages if not p.is_closed()]
     if not live:
-        await browser_context.new_page()
+        try:
+            await browser_context.new_page()
+        except Exception as e:
+            if restart_context and _is_context_closed_error(e):
+                logger.warn(f'  Browser context closed before first record, restarting... ({e})')
+                browser_context = await restart_context(str(e))
+                if not [p for p in browser_context.pages if not p.is_closed()]:
+                    await browser_context.new_page()
+            else:
+                raise
 
     total = len(records)
     for i, record in enumerate(records):
@@ -4942,7 +4963,14 @@ async def batch_upload(browser_context, records, options=None):
             if attempt > 0:
                 logger.info(f'  Retry {attempt}/{MAX_RETRIES}')
                 await asyncio.sleep(3)
-            result = await process_video(browser_context, record)
+            try:
+                result = await process_video(browser_context, record)
+            except Exception as e:
+                if restart_context and _is_context_closed_error(e):
+                    logger.warn(f'  Browser context closed, restarting and retrying current record... ({e})')
+                    browser_context = await restart_context(str(e))
+                    continue
+                raise
             if result['status'] == 'published' or result.get('_errorType') in (
                     'login-expired', 'title-error', 'upload-failed'):
                 break

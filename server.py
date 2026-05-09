@@ -2267,10 +2267,38 @@ async def _upload_async(account_name, csv_content, schedule_interval_min=None):
 
     upload_profile_dir = acct['profileDir']
     upload_profile_temp_root = None
+    use_headless = upload_headless_from_env()
+
+    async def _restart_upload_context(reason=''):
+        nonlocal ctx, upload_profile_dir, upload_profile_temp_root
+        old = ctx
+        if old is not None:
+            try:
+                await old.close()
+            except Exception:
+                pass
+            try:
+                _cleanup_temp_profile(old, persist_back=False)
+            except Exception:
+                pass
+        active_contexts.pop(account_name, None)
+
+        upload_profile_dir = acct['profileDir']
+        upload_profile_temp_root = None
+        await unlock_profile(acct['profileDir'])
+        if use_headless and sys.platform == 'darwin':
+            upload_profile_dir, upload_profile_temp_root = _prepare_headless_upload_profile(acct['profileDir'])
+        logger.warn(f'Upload browser restarting... {("reason: " + reason) if reason else ""}')
+        ctx = await init_browser(upload_profile_dir, headless=use_headless)
+        if upload_profile_temp_root:
+            ctx._wx_temp_profile_root = upload_profile_temp_root
+            ctx._wx_temp_profile_dir = upload_profile_dir
+        active_contexts[account_name] = ctx
+        return ctx
+
     try:
         if ctx is None:
             await unlock_profile(acct['profileDir'])
-            use_headless = upload_headless_from_env()
             logger.info(
                 f'Upload browser: {"headless" if use_headless else "visible window"} '
                 f'(HEADLESS_UPLOAD=0/false/off 才有界面；未设置则默认无头)'
@@ -2365,6 +2393,7 @@ async def _upload_async(account_name, csv_content, schedule_interval_min=None):
             'abortSignal': upload_state,
             'onProgress': on_progress,
             'onLoginExpired': on_login_expired,
+            'restartContext': _restart_upload_context,
         })
 
         login_expired = any(r.get('_loginExpired') for r in results)
