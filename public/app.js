@@ -883,10 +883,10 @@ function updateAccountPanel() {
 
   badge.className = "sidebar-account-badge " + badgeClass;
   badge.textContent = badgeText;
-  loginBtn.disabled = loginLock;
-  verifyBtn.disabled = loginLock || accountVerifyLoading;
+  loginBtn.disabled = loginLock || uploadRunning;
+  verifyBtn.disabled = loginLock || accountVerifyLoading || uploadRunning;
   verifyBtn.classList.remove("btn-loading");
-  verifyBtn.textContent = "确认状态";
+  verifyBtn.textContent = uploadRunning ? "上传中" : "确认状态";
   loginBtn.textContent = loginLock ? "等待扫码…" : acct && acct.status === "ready" ? "重新登录" : "扫码登录";
 }
 
@@ -1859,11 +1859,13 @@ function resetAddForm() {
 
 $("channelLoginBtn").addEventListener("click", () => {
   if (loginLock) return toast("请先完成扫码登录", "warn");
+  if (uploadRunning) return toast("上传过程中不检测登录状态，也不支持重新扫码，请等上传完成", "warn");
   loginAccount();
 });
 
 $("channelVerifyBtn").addEventListener("click", () => {
   if (loginLock) return toast("请先完成扫码登录", "warn");
+  if (uploadRunning) return toast("上传过程中已暂停登录状态检测，上传完成后会自动恢复", "info");
   verifyAccount(getSelectedAccountName(), { passive: true });
 });
 
@@ -1888,6 +1890,12 @@ function updateAccountStatus() {
 
 async function verifyAccount(name, options = {}) {
   const { silent = false, buttonless = false, forceToastOnInvalid = false, passive = false } = options;
+  if (uploadRunning) {
+    if (!silent) {
+      toast("上传过程中已暂停登录状态检测，上传完成后会自动恢复", "info");
+    }
+    return false;
+  }
   if (accountVerifyPromises.has(name)) return accountVerifyPromises.get(name);
   const card = buttonless ? null : $("channelVerifyBtn");
   if (card) {
@@ -1899,6 +1907,11 @@ async function verifyAccount(name, options = {}) {
 
   const task = (async () => {
     try {
+      const authed = await checkAuth({ allowAutoEnter: true });
+      if (!authed) {
+        if (!silent) toast("软件登录状态已失效，请重新登录", "error");
+        return false;
+      }
       const vRes = await api(`/api/accounts/${name}/verify`, { method: "POST", body: JSON.stringify({ passive }) });
       const vData = await vRes.json().catch(() => ({}));
       if (!vRes.ok) {
