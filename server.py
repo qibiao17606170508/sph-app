@@ -669,15 +669,13 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     current_dir = os.path.dirname(current_exe)
     new_dir = os.path.dirname(new_exe)
     old_pid = os.getpid()
-    helper_log_root = (
-        os.environ.get('LOCALAPPDATA')
-        or os.environ.get('APPDATA')
-        or BASE_DIR
-        or tempfile.gettempdir()
-    )
-    helper_log_root = os.path.join(helper_log_root, '视频号批量上传')
+    helper_log_root = current_dir or BASE_DIR or tempfile.gettempdir()
     os.makedirs(helper_log_root, exist_ok=True)
     log_path = os.path.join(helper_log_root, 'update-helper.log')
+    keep_dirs = ['uploads', 'screenshots', 'browser-profiles', 'downloads', 'webview-storage', 'data']
+    keep_files = ['accounts.json', 'accounts.json.bak', 'results.csv', 'upload.log', 'app.log', 'last-batch.csv']
+    keep_dirs_args = ' '.join(_powershell_single_quote(os.path.join(current_dir, name)) for name in keep_dirs)
+    keep_files_args = ' '.join(_powershell_single_quote(name) for name in keep_files)
 
     script_fd, script_path = tempfile.mkstemp(prefix='wx-update-relaunch-', suffix='.ps1')
     quoted_new_dir = _powershell_single_quote(new_dir)
@@ -730,7 +728,7 @@ try {{
   if ((Test-Path -LiteralPath $newDir) -and ($newDir -ne $currentDir)) {{
     $installOk = $false
     for ($attempt = 1; $attempt -le 90; $attempt++) {{
-      $null = robocopy $newDir $currentDir /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP
+      $null = robocopy $newDir $currentDir __ROBOCOPY_OPTS__
       $copyCode = $LASTEXITCODE
       Write-UpdateLog ("robocopy attempt " + $attempt + " exit code: " + $copyCode)
       if ($copyCode -lt 8) {{
@@ -781,6 +779,7 @@ if (Test-Path -LiteralPath $scriptPath) {{
         .replace('__EXTRACT_DIR__', quoted_extract_dir)
         .replace('__SCRIPT_PATH__', quoted_script_path)
         .replace('__LOG_PATH__', quoted_log_path)
+        .replace('__ROBOCOPY_OPTS__', f"/MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP /XD {keep_dirs_args} /XF {keep_files_args}")
     )
     try:
         with os.fdopen(script_fd, 'w', encoding='utf-8') as f:
@@ -848,7 +847,7 @@ def _restart_app_process(open_target, package_path='', extract_dir=''):
         if sys.platform == 'darwin':
             _schedule_macos_update_install_and_launch(open_target, package_path, extract_dir)
         elif sys.platform == 'win32':
-            target = _schedule_windows_update_install_and_launch(open_target, package_path, extract_dir)
+            launch_update_target(target)
         else:
             launch_update_target(target)
     except Exception as e:
@@ -874,12 +873,7 @@ def _restart_app_process(open_target, package_path='', extract_dir=''):
         os._exit(0)
 
     if sys.platform == 'win32':
-        time.sleep(0.25)
-        try:
-            cleanup()
-        except Exception:
-            pass
-        os._exit(0)
+        time.sleep(1.2)
     else:
         time.sleep(1.2)
     _cleanup_update_artifacts(package_path, extract_dir, target)
