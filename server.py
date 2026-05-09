@@ -660,14 +660,14 @@ cleanup
         raise
 
 
-def _schedule_windows_update_install_and_launch(open_target, package_path='', extract_dir=''):
+def _schedule_windows_update_install_and_launch(open_target, package_path='', extract_dir='', install_dir=''):
     new_exe = os.path.normpath(str(open_target or '').strip())
     if not new_exe or not os.path.exists(new_exe):
         raise FileNotFoundError('未找到可安装的新版本程序')
 
     current_exe = os.path.normpath(os.path.realpath(sys.executable))
     current_dir = os.path.dirname(current_exe)
-    new_dir = os.path.dirname(new_exe)
+    new_dir = os.path.normpath(str(install_dir or '').strip()) or os.path.dirname(new_exe)
     old_pid = os.getpid()
     helper_log_root = current_dir or BASE_DIR or tempfile.gettempdir()
     os.makedirs(helper_log_root, exist_ok=True)
@@ -748,12 +748,45 @@ try {{
 }}
 
 Start-Sleep -Milliseconds 400
+$sourceExe = Join-Path $newDir (Split-Path $currentExe -Leaf)
 $installedExe = Join-Path $currentDir (Split-Path $currentExe -Leaf)
-if (-not (Test-Path -LiteralPath $installedExe)) {{
+if (-not (Test-Path -LiteralPath $sourceExe)) {{
+  Write-UpdateLog "source exe missing after extract"
+  throw "source exe missing: $sourceExe"
+}}
+try {{
+  Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force
+  Write-UpdateLog "copied exe to install dir"
+}} catch {{
+  Write-UpdateLog ("copy exe failed: " + $_.Exception.Message)
+  throw
+}}
+$sourceInternal = Join-Path $newDir '_internal'
+$targetInternal = Join-Path $currentDir '_internal'
+if (Test-Path -LiteralPath $sourceInternal) {{
+  $internalOk = $false
+  for ($attempt = 1; $attempt -le 30; $attempt++) {{
+    $null = robocopy $sourceInternal $targetInternal /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP
+    $copyCode = $LASTEXITCODE
+    Write-UpdateLog ("_internal robocopy attempt " + $attempt + " exit code: " + $copyCode)
+    if ($copyCode -lt 8) {{
+      $internalOk = $true
+      break
+    }}
+    Start-Sleep -Milliseconds 500
+  }}
+  if (-not $internalOk) {{
+    throw "copy _internal failed after retries"
+  }}
+  Write-UpdateLog "copied _internal to install dir"
+}}
+
+$installedExe = Join-Path $currentDir (Split-Path $currentExe -Leaf)
   Write-UpdateLog "installed exe missing after move"
   throw "installed exe missing: $installedExe"
 }}
 Write-UpdateLog "starting installed exe: $installedExe"
+Start-Process -FilePath $installedExe -WorkingDirectory $currentDir
 Start-Process -FilePath $installedExe -WorkingDirectory $currentDir
 
 Start-Sleep -Seconds 2
@@ -841,13 +874,13 @@ def _cleanup_update_artifacts(package_path='', extract_dir='', launched_target='
     _rm_rf(extract_dir)
 
 
-def _restart_app_process(open_target, package_path='', extract_dir=''):
+def _restart_app_process(open_target, package_path='', extract_dir='', install_dir=''):
     try:
         target = open_target
         if sys.platform == 'darwin':
             _schedule_macos_update_install_and_launch(open_target, package_path, extract_dir)
         elif sys.platform == 'win32':
-            _schedule_windows_update_install_and_launch(open_target, package_path, extract_dir)
+            target = _schedule_windows_update_install_and_launch(open_target, package_path, extract_dir, install_dir)
         else:
             launch_update_target(target)
     except Exception as e:
@@ -932,6 +965,24 @@ def find_update_launch_target(root_dir):
     return root_dir
 
 
+def find_update_install_dir(root_dir, open_target):
+    target = os.path.normpath(str(open_target or '').strip())
+    if not target:
+        return os.path.normpath(root_dir)
+
+    if sys.platform == 'win32':
+        if os.path.isfile(target):
+            return os.path.dirname(target)
+        if os.path.isdir(target):
+            return target
+        return os.path.normpath(root_dir)
+
+    if os.path.isdir(target):
+        return target
+    parent = os.path.dirname(target)
+    return parent or os.path.normpath(root_dir)
+
+
 def prepare_downloaded_update(file_path, version):
     if str(file_path).lower().endswith('.zip'):
         extract_dir = get_update_extract_dir(version)
@@ -939,15 +990,18 @@ def prepare_downloaded_update(file_path, version):
             shutil.rmtree(extract_dir, ignore_errors=True)
         os.makedirs(extract_dir, exist_ok=True)
         _extract_update_zip(file_path, extract_dir)
+        open_target = find_update_launch_target(extract_dir)
         return {
             'path': file_path,
             'extract_dir': extract_dir,
-            'open_target': find_update_launch_target(extract_dir),
+            'open_target': open_target,
+            'install_dir': find_update_install_dir(extract_dir, open_target),
         }
     return {
         'path': file_path,
         'extract_dir': '',
         'open_target': file_path,
+        'install_dir': os.path.dirname(file_path) if os.path.isfile(file_path) else '',
     }
 
 
@@ -2663,13 +2717,14 @@ def _perform_update_download(info):
             path=local_path,
             extract_dir=prepared.get('extract_dir', ''),
             open_target=open_target,
+            install_dir=prepared.get('install_dir', ''),
             finished_at=datetime.now(timezone.utc).isoformat(),
             restart_ready=False,
             restarting=True,
         )
         threading.Thread(
             target=_restart_app_process,
-            args=(open_target, local_path, prepared.get('extract_dir', '')),
+            args=(open_target, local_path, prepared.get('extract_dir', ''), prepared.get('install_dir', '')),
             daemon=True,
         ).start()
     except Exception as e:
@@ -2698,6 +2753,7 @@ def api_update_restart():
         open_target = str(state.get('open_target') or '').strip()
         package_path = str(state.get('path') or '').strip()
         extract_dir = str(state.get('extract_dir') or '').strip()
+        install_dir = str(state.get('install_dir') or '').strip()
         if not open_target:
             return jsonify({'error': '新版本尚未准备完成'}), 400
         if state.get('restarting'):
@@ -2721,7 +2777,7 @@ def api_update_restart():
         )
         threading.Thread(
             target=_restart_app_process,
-            args=(open_target, package_path, extract_dir),
+            args=(open_target, package_path, extract_dir, install_dir),
             daemon=True,
         ).start()
         return jsonify({
