@@ -179,6 +179,44 @@ update_state_lock = threading.Lock()
 update_state = {}
 
 
+def load_remembered_credentials():
+    if not os.path.exists(REMEMBERED_CREDENTIALS_PATH):
+        return {}
+    try:
+        with open(REMEMBERED_CREDENTIALS_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        username = str(data.get('u') or '').strip()
+        password = str(data.get('p') or '')
+        if not username or not password:
+            return {}
+        return {'u': username, 'p': password}
+    except Exception:
+        return {}
+
+
+def save_remembered_credentials(username, password):
+    username = str(username or '').strip()
+    password = str(password or '')
+    if not username or not password:
+        clear_remembered_credentials()
+        return
+    try:
+        with open(REMEMBERED_CREDENTIALS_PATH, 'w', encoding='utf-8') as f:
+            json.dump({'u': username, 'p': password}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def clear_remembered_credentials():
+    try:
+        if os.path.exists(REMEMBERED_CREDENTIALS_PATH):
+            os.remove(REMEMBERED_CREDENTIALS_PATH)
+    except Exception:
+        pass
+
+
 def reset_update_state():
     with update_state_lock:
         update_state.clear()
@@ -683,11 +721,7 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     except Exception:
         pass
     keep_dirs = ['uploads', 'screenshots', 'browser-profiles', 'downloads', 'webview-storage', 'data']
-    keep_files = ['accounts.json', 'accounts.json.bak', 'results.csv', 'upload.log', 'app.log', 'last-batch.csv']
-    # Robocopy 排除参数需要双引号，因为单引号在传递给外部 EXE 时可能被视为路径的一部分
-    keep_dirs_args = ' '.join(f'"{os.path.join(current_dir, name)}"' for name in keep_dirs)
-    keep_files_args = ' '.join(f'"{name}"' for name in keep_files)
-
+    keep_files = ['accounts.json', 'accounts.json.bak', 'remembered.json', 'results.csv', 'upload.log', 'app.log', 'last-batch.csv']
     script_fd, script_path = tempfile.mkstemp(prefix='wx-update-relaunch-', suffix='.ps1')
     quoted_new_dir = _powershell_single_quote(new_dir)
     quoted_current_dir = _powershell_single_quote(current_dir)
@@ -827,6 +861,7 @@ if (Test-Path -LiteralPath $scriptPath) {
         .replace('__CURRENT_EXE__', quoted_current_exe)
         .replace('__PACKAGE_PATH__', quoted_package_path)
         .replace('__EXTRACT_DIR__', quoted_extract_dir)
+        .replace('__SCRIPT_PATH__', quoted_script_path)
         .replace('__LOG_PATH__', quoted_log_path)
         .replace('__ROBOCOPY_XD__', f"/XD {xd_list}")
         .replace('__ROBOCOPY_XF__', f"/XF {xf_list}")
@@ -1630,31 +1665,16 @@ def api_auth_status():
 @app.route('/api/auth/remembered', methods=['GET', 'POST'])
 def api_auth_remembered():
     if request.method == 'GET':
-        if not os.path.exists(REMEMBERED_CREDENTIALS_PATH):
-            return jsonify({})
-        try:
-            with open(REMEMBERED_CREDENTIALS_PATH, 'r', encoding='utf-8') as f:
-                return jsonify(json.load(f))
-        except Exception:
-            return jsonify({})
+        return jsonify(load_remembered_credentials())
     else:
         data = request.get_json(silent=True) or {}
-        username = data.get('username')
-        password = data.get('password')
-        if username and password:
-            try:
-                with open(REMEMBERED_CREDENTIALS_PATH, 'w', encoding='utf-8') as f:
-                    json.dump({'u': username, 'p': password}, f, ensure_ascii=False, indent=2)
-                return jsonify({'message': '已记住账号密码'})
-            except Exception as e:
-                return jsonify({'error': str(e)}), 500
-        else:
-            if os.path.exists(REMEMBERED_CREDENTIALS_PATH):
-                try:
-                    os.remove(REMEMBERED_CREDENTIALS_PATH)
-                except Exception:
-                    pass
-            return jsonify({'message': '已清除记住的账号密码'})
+        username = data.get('username', '')
+        password = data.get('password', '')
+        if str(username).strip() and str(password):
+            save_remembered_credentials(username, password)
+            return jsonify({'message': '已记住账号密码'})
+        clear_remembered_credentials()
+        return jsonify({'message': '已清除记住的账号密码'})
 
 
 @app.route('/api/auth/login', methods=['POST'])
@@ -1662,6 +1682,7 @@ def api_auth_login():
     data = request.get_json(silent=True) or {}
     username = str(data.get('username', '')).strip()
     password = str(data.get('password', ''))
+    remember = bool(data.get('remember'))
     if not username or not password:
         return jsonify({'error': '请输入用户名和密码'}), 400
 
@@ -1681,6 +1702,10 @@ def api_auth_login():
     session['auth_token'] = token
     session['auth_login_at'] = session['auth_user']['loginAt']
     session.modified = True
+    if remember:
+        save_remembered_credentials(username, password)
+    else:
+        clear_remembered_credentials()
     return jsonify({
         'message': '登录成功',
         'user': session['auth_user'],
