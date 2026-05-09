@@ -281,6 +281,7 @@ function toast(msg, type) {
 async function enterAuthedApp(user) {
   setLoginError("");
   setAuthUser(user);
+  await refreshVersionInfo();
   showAppShell();
   connectWS();
   await loadAccounts({ silent: true, skipVerify: true });
@@ -456,6 +457,18 @@ function applyVersionInfo(info) {
   $("sidebarVersion").textContent = "v" + currentVersion;
 }
 
+async function refreshVersionInfo() {
+  try {
+    const res = await fetch("/api/version");
+    const info = await res.json().catch(() => ({ version: currentVersion || "0.0.0" }));
+    applyVersionInfo(info || {});
+    return info || {};
+  } catch (_) {
+    applyVersionInfo({ version: currentVersion || "0.0.0" });
+    return { version: currentVersion || "0.0.0" };
+  }
+}
+
 function renderForceUpdate(info) {
   forceUpdateInfo = info || null;
   $("updateCurrentVersion").textContent = "当前版本: v" + ((info && info.current_version) || currentVersion || "-");
@@ -581,15 +594,12 @@ function promptOptionalUpdate(info, options = {}) {
 
 async function checkForceUpdate() {
   try {
-    const [versionRes, updateRes] = await Promise.all([
-      fetch("/api/version")
-        .then((r) => r.json())
-        .catch(() => ({ version: "0.0.0" })),
+    const [, updateRes] = await Promise.all([
+      refreshVersionInfo(),
       fetch("/api/update/check")
         .then((r) => r.json())
         .catch(() => ({ enabled: false })),
     ]);
-    applyVersionInfo(versionRes || {});
     if (updateRes && updateRes.enabled && updateRes.available) {
       if (updateRes.required) {
         renderForceUpdate(updateRes);
@@ -2154,6 +2164,7 @@ document.addEventListener("visibilitychange", () => {
   authResolved = false;
   setAuthUser(null);
   showAuthShell();
+  await refreshVersionInfo();
   loadRememberedLogin();
   fetchUpdateStatus()
     .then((state) => {

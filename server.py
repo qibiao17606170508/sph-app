@@ -659,6 +659,97 @@ cleanup
         _rm_rf(script_path)
         raise
 
+
+def _schedule_windows_update_install_and_launch(open_target, package_path='', extract_dir=''):
+    new_exe = os.path.normpath(str(open_target or '').strip())
+    if not new_exe or not os.path.exists(new_exe):
+        raise FileNotFoundError('未找到可安装的新版本程序')
+
+    current_exe = os.path.normpath(os.path.realpath(sys.executable))
+    current_dir = os.path.dirname(current_exe)
+    new_dir = os.path.dirname(new_exe)
+    old_pid = os.getpid()
+
+    script_fd, script_path = tempfile.mkstemp(prefix='wx-update-relaunch-', suffix='.ps1')
+    quoted_new_dir = _powershell_single_quote(new_dir)
+    quoted_current_dir = _powershell_single_quote(current_dir)
+    quoted_current_exe = _powershell_single_quote(current_exe)
+    quoted_package_path = _powershell_single_quote(os.path.normpath(str(package_path or '').strip()))
+    quoted_extract_dir = _powershell_single_quote(os.path.normpath(str(extract_dir or '').strip()))
+    quoted_script_path = _powershell_single_quote(script_path)
+    script = f"""$ErrorActionPreference = 'Stop'
+$oldPid = {old_pid}
+$newDir = {quoted_new_dir}
+$currentDir = {quoted_current_dir}
+$currentExe = {quoted_current_exe}
+$packagePath = {quoted_package_path}
+$extractDir = {quoted_extract_dir}
+$scriptPath = {quoted_script_path}
+
+for ($i = 0; $i -lt 120; $i++) {{
+  if (-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {{
+    break
+  }}
+  Start-Sleep -Seconds 1
+}}
+
+if (-not (Test-Path -LiteralPath $currentDir)) {{
+  New-Item -ItemType Directory -Path $currentDir -Force | Out-Null
+}}
+
+if ((Test-Path -LiteralPath $newDir) -and ($newDir -ne $currentDir)) {{
+  $null = robocopy $newDir $currentDir /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+  if ($LASTEXITCODE -ge 8) {{
+    throw "robocopy failed with exit code $LASTEXITCODE"
+  }}
+}}
+
+Start-Sleep -Milliseconds 400
+Start-Process -FilePath $currentExe -WorkingDirectory $currentDir
+
+Start-Sleep -Seconds 2
+if ($packagePath -and (Test-Path -LiteralPath $packagePath)) {{
+  Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+}}
+if ($extractDir -and (Test-Path -LiteralPath $extractDir)) {{
+  Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+}}
+if (Test-Path -LiteralPath $scriptPath) {{
+  Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
+}}
+"""
+    try:
+        with os.fdopen(script_fd, 'w', encoding='utf-8') as f:
+            f.write(script)
+        creationflags = 0
+        for flag_name in ('CREATE_NEW_PROCESS_GROUP', 'DETACHED_PROCESS', 'CREATE_NO_WINDOW'):
+            creationflags |= int(getattr(subprocess, flag_name, 0) or 0)
+        subprocess.Popen(
+            [
+                'powershell',
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-WindowStyle',
+                'Hidden',
+                '-File',
+                script_path,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+            close_fds=True,
+        )
+        return current_exe
+    except Exception:
+        try:
+            os.close(script_fd)
+        except Exception:
+            pass
+        _rm_rf(script_path)
+        raise
+
 def _cleanup_update_artifacts(package_path='', extract_dir='', launched_target=''):
     package_path = str(package_path or '').strip()
     extract_dir = str(extract_dir or '').strip()
@@ -693,7 +784,7 @@ def _restart_app_process(open_target, package_path='', extract_dir=''):
         if sys.platform == 'darwin':
             _schedule_macos_update_install_and_launch(open_target, package_path, extract_dir)
         elif sys.platform == 'win32':
-            schedule_update_target_launch(target)
+            target = _schedule_windows_update_install_and_launch(open_target, package_path, extract_dir)
         else:
             launch_update_target(target)
     except Exception as e:
@@ -720,6 +811,11 @@ def _restart_app_process(open_target, package_path='', extract_dir=''):
 
     if sys.platform == 'win32':
         time.sleep(0.25)
+        try:
+            cleanup()
+        except Exception:
+            pass
+        os._exit(0)
     else:
         time.sleep(1.2)
     _cleanup_update_artifacts(package_path, extract_dir, target)
