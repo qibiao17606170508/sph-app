@@ -792,7 +792,7 @@ try {
       $robocopyArgs += '/XF'
       $robocopyArgs += __KEEP_FILES__
       
-      & robocopy $robocopyArgs
+      & robocopy @robocopyArgs
       $copyCode = $LASTEXITCODE
       Write-UpdateLog "robocopy attempt $attempt exit code: $copyCode"
       if ($copyCode -lt 8) {
@@ -809,10 +809,18 @@ try {
   $exeName = Split-Path $currentExe -Leaf
   $sourceExe = Join-Path $newDir $exeName
   $installedExe = Join-Path $currentDir $exeName
+  Write-UpdateLog "sourceExe=$sourceExe ; installedExe=$installedExe"
   
-  if (Test-Path -LiteralPath $sourceExe) {
+  if (-not (Test-Path -LiteralPath $sourceExe)) {
+    throw "source exe missing: $sourceExe"
+  }
+
+  try {
     Write-UpdateLog "ensuring main exe is updated"
-    Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force -ErrorAction Stop
+  } catch {
+    Write-UpdateLog ("copy main exe failed: " + $_.Exception.Message)
+    throw
   }
 
   $sourceInternal = Join-Path $newDir '_internal'
@@ -822,14 +830,29 @@ try {
     $internalOk = $false
     for ($attempt = 1; $attempt -le 10; $attempt++) {
       & robocopy $sourceInternal $targetInternal /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP
-      if ($LASTEXITCODE -lt 8) { $internalOk = $true; break }
+      $internalCode = $LASTEXITCODE
+      Write-UpdateLog "internal robocopy attempt $attempt exit code: $internalCode"
+      if ($internalCode -lt 8) { $internalOk = $true; break }
       Start-Sleep -Milliseconds 500
     }
+    if (-not $internalOk) {
+      throw "copy _internal failed after retries"
+    }
+  } else {
+    Write-UpdateLog "_internal not found in source dir"
+  }
+
+  if (-not (Test-Path -LiteralPath $installedExe)) {
+    throw "installed exe missing after copy: $installedExe"
   }
 
   Write-UpdateLog "launching new version: $installedExe"
-  Start-Process -FilePath $installedExe -WorkingDirectory $currentDir
-  Write-UpdateLog "success, helper exiting"
+  $startedProcess = Start-Process -FilePath $installedExe -WorkingDirectory $currentDir -PassThru
+  if ($startedProcess -and $startedProcess.Id) {
+    Write-UpdateLog ("success, started pid: " + $startedProcess.Id)
+  } else {
+    Write-UpdateLog "success, process started"
+  }
 } catch {
   Write-UpdateLog ("CRITICAL ERROR: " + $_.Exception.Message)
   if (Test-Path -LiteralPath $currentExe) {
@@ -898,7 +921,7 @@ if (Test-Path -LiteralPath $scriptPath) {
         with open(log_path, 'a', encoding='utf-8') as f:
             f.write(f'[{datetime.now()}] starting powershell update helper: {" ".join(args)}\n')
             
-        subprocess.Popen(
+        helper_proc = subprocess.Popen(
             args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -906,6 +929,11 @@ if (Test-Path -LiteralPath $scriptPath) {
             close_fds=True,
             cwd=tempfile.gettempdir(), # 切换工作目录到临时文件夹，避免占用当前目录
         )
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(f'[{datetime.now()}] powershell helper pid: {helper_proc.pid}\n')
+        except Exception:
+            pass
         return current_exe
     except Exception as e:
         with open(log_path, 'a', encoding='utf-8') as f:

@@ -25,6 +25,7 @@ let lastWindowCheckAt = 0;
 let lastOptionalUpdatePromptKey = "";
 const REMEMBER_LOGIN_KEY = "remember_login_credentials";
 let accountVerifyLoading = false;
+let rememberedLoginCache = null;
 /** 当前批次开始上传时的条目 id 顺序（与后端 current 下标一致），用于发表后从队列移除 */
 let uploadOrderIds = [];
 
@@ -149,9 +150,14 @@ function handleBlockingLoadingEvent(d) {
 async function loadRememberedLogin() {
   const applyRemembered = (data) => {
     if (!data || !data.u || !data.p) return false;
+    rememberedLoginCache = { u: data.u, p: data.p };
     $("loginUsername").value = data.u;
     $("loginPassword").value = data.p;
+    $("loginUsername").setAttribute("value", data.u);
+    $("loginPassword").setAttribute("value", data.p);
     $("rememberMe").checked = true;
+    $("loginUsername").dispatchEvent(new Event("input", { bubbles: true }));
+    $("loginPassword").dispatchEvent(new Event("input", { bubbles: true }));
     return true;
   };
   try {
@@ -166,18 +172,39 @@ async function loadRememberedLogin() {
   }
   try {
     const raw = localStorage.getItem(REMEMBER_LOGIN_KEY);
-    if (raw) applyRemembered(JSON.parse(raw));
+    if (raw) {
+      applyRemembered(JSON.parse(raw));
+      scheduleRememberedLoginRefill();
+    }
   } catch (_) {
     /* ignore */
   }
+}
+
+function refillRememberedLoginFromCache() {
+  if (!rememberedLoginCache || !rememberedLoginCache.u || !rememberedLoginCache.p) return;
+  $("loginUsername").value = rememberedLoginCache.u;
+  $("loginPassword").value = rememberedLoginCache.p;
+  $("loginUsername").setAttribute("value", rememberedLoginCache.u);
+  $("loginPassword").setAttribute("value", rememberedLoginCache.p);
+  $("rememberMe").checked = true;
+}
+
+function scheduleRememberedLoginRefill() {
+  refillRememberedLoginFromCache();
+  setTimeout(refillRememberedLoginFromCache, 0);
+  setTimeout(refillRememberedLoginFromCache, 120);
+  setTimeout(refillRememberedLoginFromCache, 400);
 }
 
 async function persistRememberedLogin(username, password, remember) {
   try {
     if (remember) {
       const creds = { u: username, p: password };
+      rememberedLoginCache = creds;
       localStorage.setItem(REMEMBER_LOGIN_KEY, JSON.stringify(creds));
     } else {
+      rememberedLoginCache = null;
       localStorage.removeItem(REMEMBER_LOGIN_KEY);
     }
   } catch (_) {
@@ -203,6 +230,7 @@ function showAuthShell() {
   $("updateShell").style.display = "none";
   $("authShell").style.display = "flex";
   $("appShell").style.display = "none";
+  scheduleRememberedLoginRefill();
 }
 
 function showAppShell() {
@@ -2212,6 +2240,7 @@ setInterval(() => {
   showAuthShell();
   await refreshVersionInfo();
   await loadRememberedLogin();
+  scheduleRememberedLoginRefill();
   fetchUpdateStatus()
     .then((state) => {
       if (state && state.running) {
@@ -2227,12 +2256,14 @@ setInterval(() => {
   runWindowOpenChecks({ force: true, autoEnterAuth: true })
     .then(() => {
       if (!authUser) {
+        scheduleRememberedLoginRefill();
         if ($("loginPassword").value) $("loginPassword").focus();
         else $("loginUsername").focus();
       }
     })
     .catch((e) => {
       console.error("Init check error:", e);
+      scheduleRememberedLoginRefill();
       if ($("loginPassword").value) $("loginPassword").focus();
       else $("loginUsername").focus();
     });
