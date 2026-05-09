@@ -847,7 +847,7 @@ def _restart_app_process(open_target, package_path='', extract_dir=''):
         if sys.platform == 'darwin':
             _schedule_macos_update_install_and_launch(open_target, package_path, extract_dir)
         elif sys.platform == 'win32':
-            launch_update_target(target)
+            _schedule_windows_update_install_and_launch(open_target, package_path, extract_dir)
         else:
             launch_update_target(target)
     except Exception as e:
