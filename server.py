@@ -196,6 +196,27 @@ def load_remembered_credentials():
         return {}
 
 
+def render_index_html():
+    public_dir = os.path.join(RES_DIR, 'public')
+    index_path = os.path.join(public_dir, 'index.html')
+    try:
+        with open(index_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+    except Exception:
+        return send_from_directory(public_dir, 'index.html')
+
+    bootstrap = {
+        'rememberedLogin': load_remembered_credentials() or None,
+    }
+    bootstrap_json = json.dumps(bootstrap, ensure_ascii=False).replace('</', '<\\/')
+    injected = f'<script>window.__APP_BOOTSTRAP__ = {bootstrap_json};</script>'
+    if '</body>' in html:
+        html = html.replace('</body>', f'  {injected}\n  </body>', 1)
+    else:
+        html += injected
+    return app.response_class(html, mimetype='text/html')
+
+
 def save_remembered_credentials(username, password):
     username = str(username or '').strip()
     password = str(password or '')
@@ -3077,7 +3098,7 @@ def favicon():
 
 @app.route('/')
 def index():
-    return send_from_directory(os.path.join(RES_DIR, 'public'), 'index.html')
+    return render_index_html()
 
 
 @app.route('/<path:path>')
@@ -3086,7 +3107,7 @@ def static_files(path):
     public_path = os.path.join(public_dir, path)
     if os.path.exists(public_path):
         return send_from_directory(public_dir, path)
-    return send_from_directory(public_dir, 'index.html')
+    return render_index_html()
 
 
 @app.route('/api/version')

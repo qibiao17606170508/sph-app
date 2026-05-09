@@ -14,11 +14,17 @@ from datetime import datetime
 
 # 确保在可写数据目录运行
 _CODE_DIR = os.path.dirname(os.path.abspath(__file__))
-if not os.environ.get('APP_RES_DIR'):
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+
+# 打包版更新后由旧进程拉起新进程时，会继承旧的 APP_RES_DIR。
+# 该目录可能仍指向旧版本的临时解包目录，导致新版本继续读取旧资源/旧 version.json。
+# 因此 frozen 模式下始终以当前进程自己的资源目录为准，不沿用继承值。
+if getattr(sys, 'frozen', False):
+    if hasattr(sys, '_MEIPASS'):
         os.environ['APP_RES_DIR'] = sys._MEIPASS
     else:
         os.environ['APP_RES_DIR'] = _CODE_DIR
+elif not os.environ.get('APP_RES_DIR'):
+    os.environ['APP_RES_DIR'] = _CODE_DIR
 
 if not os.environ.get('APP_BASE_DIR'):
     if getattr(sys, 'frozen', False):

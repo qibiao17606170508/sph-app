@@ -25,7 +25,8 @@ let lastWindowCheckAt = 0;
 let lastOptionalUpdatePromptKey = "";
 const REMEMBER_LOGIN_KEY = "remember_login_credentials";
 let accountVerifyLoading = false;
-let rememberedLoginCache = null;
+const INITIAL_BOOTSTRAP = (typeof window !== "undefined" && window.__APP_BOOTSTRAP__) || {};
+let rememberedLoginCache = INITIAL_BOOTSTRAP.rememberedLogin || null;
 /** 当前批次开始上传时的条目 id 顺序（与后端 current 下标一致），用于发表后从队列移除 */
 let uploadOrderIds = [];
 
@@ -160,6 +161,9 @@ async function loadRememberedLogin() {
     $("loginPassword").dispatchEvent(new Event("input", { bubbles: true }));
     return true;
   };
+  if (applyRemembered(rememberedLoginCache)) {
+    scheduleRememberedLoginRefill();
+  }
   try {
     const res = await api("/api/auth/remembered");
     const data = await res.json();
