@@ -146,17 +146,50 @@ function handleBlockingLoadingEvent(d) {
   }
 }
 
-function loadRememberedLogin() {
+async function loadRememberedLogin() {
   try {
-    localStorage.removeItem(REMEMBER_LOGIN_KEY);
+    // 优先从 localStorage 加载，以便快速显示
+    const raw = localStorage.getItem(REMEMBER_LOGIN_KEY);
+    if (raw) {
+      const { u, p } = JSON.parse(raw);
+      if (u && p) {
+        $("loginUsername").value = u;
+        $("loginPassword").value = p;
+        $("rememberMe").checked = true;
+      }
+    }
+
+    // 然后从服务端加载最新的缓存（同步/更新）
+    const res = await api("/api/auth/remembered");
+    const data = await res.json();
+    if (data && data.u && data.p) {
+      $("loginUsername").value = data.u;
+      $("loginPassword").value = data.p;
+      $("rememberMe").checked = true;
+      // 同步回 localStorage
+      localStorage.setItem(REMEMBER_LOGIN_KEY, JSON.stringify(data));
+    }
   } catch (_) {
     /* ignore */
   }
 }
 
-function persistRememberedLogin(username, password) {
+async function persistRememberedLogin(username, password) {
   try {
-    localStorage.removeItem(REMEMBER_LOGIN_KEY);
+    if ($("rememberMe").checked) {
+      const creds = { u: username, p: password };
+      localStorage.setItem(REMEMBER_LOGIN_KEY, JSON.stringify(creds));
+      await api("/api/auth/remembered", {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      });
+    } else {
+      localStorage.removeItem(REMEMBER_LOGIN_KEY);
+      await api("/api/auth/remembered", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+    }
   } catch (_) {
     /* ignore */
   }
@@ -347,6 +380,7 @@ async function submitLogin(event) {
     }
     const data = await res.json();
     authResolved = true;
+    await persistRememberedLogin(username, password);
     await enterAuthedApp(data.user);
     toast("登录成功", "success");
   } catch (e) {
@@ -371,8 +405,9 @@ async function logout() {
   setStatus("idle", "未登录");
   $("liveLog").textContent = "";
   setLoginError("");
-  $("loginPassword").value = "";
-  $("loginUsername").focus();
+  await loadRememberedLogin();
+  if ($("loginPassword").value) $("loginPassword").focus();
+  else $("loginUsername").focus();
 }
 
 function openChangePasswordModal() {
@@ -2185,7 +2220,7 @@ setInterval(() => {
   setAuthUser(null);
   showAuthShell();
   await refreshVersionInfo();
-  loadRememberedLogin();
+  await loadRememberedLogin();
   fetchUpdateStatus()
     .then((state) => {
       if (state && state.running) {

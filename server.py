@@ -163,10 +163,12 @@ AUTH_CHANGE_PASSWORD_URL = 'http://47.114.217.61:9988/api/v1/admin/change-passwo
 DOWNLOADS_DIR = os.path.join(BASE_DIR, 'downloads')
 UPDATE_USER_AGENT = 'wechat-channels-uploader/1.0'
 AUTH_STATUS_GRACE_SECONDS = 8
+REMEMBERED_CREDENTIALS_PATH = os.path.join(BASE_DIR, 'remembered.json')
 PUBLIC_API_PATHS = {
     '/api/auth/login',
     '/api/auth/status',
     '/api/auth/logout',
+    '/api/auth/remembered',
     '/api/version',
     '/api/update/check',
     '/api/update/download',
@@ -1606,6 +1608,36 @@ def api_auth_status():
         'authenticated': bool(user and token),
         'user': user,
     })
+
+
+@app.route('/api/auth/remembered', methods=['GET', 'POST'])
+def api_auth_remembered():
+    if request.method == 'GET':
+        if not os.path.exists(REMEMBERED_CREDENTIALS_PATH):
+            return jsonify({})
+        try:
+            with open(REMEMBERED_CREDENTIALS_PATH, 'r', encoding='utf-8') as f:
+                return jsonify(json.load(f))
+        except Exception:
+            return jsonify({})
+    else:
+        data = request.get_json(silent=True) or {}
+        username = data.get('username')
+        password = data.get('password')
+        if username and password:
+            try:
+                with open(REMEMBERED_CREDENTIALS_PATH, 'w', encoding='utf-8') as f:
+                    json.dump({'u': username, 'p': password}, f, ensure_ascii=False, indent=2)
+                return jsonify({'message': '已记住账号密码'})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        else:
+            if os.path.exists(REMEMBERED_CREDENTIALS_PATH):
+                try:
+                    os.remove(REMEMBERED_CREDENTIALS_PATH)
+                except Exception:
+                    pass
+            return jsonify({'message': '已清除记住的账号密码'})
 
 
 @app.route('/api/auth/login', methods=['POST'])
