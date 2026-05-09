@@ -669,9 +669,17 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     current_dir = os.path.dirname(current_exe)
     new_dir = os.path.normpath(str(install_dir or '').strip()) or os.path.dirname(new_exe)
     old_pid = os.getpid()
-    helper_log_root = current_dir or BASE_DIR or tempfile.gettempdir()
+    helper_log_root = DOWNLOADS_DIR or BASE_DIR or current_dir or tempfile.gettempdir()
     os.makedirs(helper_log_root, exist_ok=True)
     log_path = os.path.join(helper_log_root, 'update-helper.log')
+    try:
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(
+                f'[{datetime.now()}] schedule windows update helper: '
+                f'current_dir={current_dir} ; new_dir={new_dir} ; open_target={new_exe}\n'
+            )
+    except Exception:
+        pass
     keep_dirs = ['uploads', 'screenshots', 'browser-profiles', 'downloads', 'webview-storage', 'data']
     keep_files = ['accounts.json', 'accounts.json.bak', 'results.csv', 'upload.log', 'app.log', 'last-batch.csv']
     keep_dirs_args = ' '.join(_powershell_single_quote(os.path.join(current_dir, name)) for name in keep_dirs)
@@ -719,13 +727,18 @@ for ($i = 0; $i -lt 120; $i++) {{
   Start-Sleep -Seconds 1
 }}
 
+if (-not (Test-Path -LiteralPath $newDir)) {{
+  Write-UpdateLog "install source dir missing: $newDir"
+  throw "install source dir missing: $newDir"
+}}
+
 if (-not (Test-Path -LiteralPath $currentDir)) {{
   New-Item -ItemType Directory -Path $currentDir -Force | Out-Null
   Write-UpdateLog "created currentDir: $currentDir"
 }}
 
 try {{
-  if ((Test-Path -LiteralPath $newDir) -and ($newDir -ne $currentDir)) {{
+  if ($newDir -ne $currentDir) {{
     $installOk = $false
     for ($attempt = 1; $attempt -le 90; $attempt++) {{
       $null = robocopy $newDir $currentDir __ROBOCOPY_OPTS__
@@ -742,52 +755,51 @@ try {{
     }}
     Write-UpdateLog "robocopy install finished"
   }}
-}} catch {{
-  Write-UpdateLog ("install step failed: " + $_.Exception.Message)
-  throw
-}}
 
-Start-Sleep -Milliseconds 400
-$sourceExe = Join-Path $newDir (Split-Path $currentExe -Leaf)
-$installedExe = Join-Path $currentDir (Split-Path $currentExe -Leaf)
-if (-not (Test-Path -LiteralPath $sourceExe)) {{
-  Write-UpdateLog "source exe missing after extract"
-  throw "source exe missing: $sourceExe"
-}}
-try {{
+  Start-Sleep -Milliseconds 400
+  $exeName = Split-Path $currentExe -Leaf
+  $sourceExe = Join-Path $newDir $exeName
+  $installedExe = Join-Path $currentDir $exeName
+  Write-UpdateLog "sourceExe=$sourceExe ; installedExe=$installedExe"
+  if (-not (Test-Path -LiteralPath $sourceExe)) {{
+    throw "source exe missing: $sourceExe"
+  }}
+
   Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force
   Write-UpdateLog "copied exe to install dir"
+
+  $sourceInternal = Join-Path $newDir '_internal'
+  $targetInternal = Join-Path $currentDir '_internal'
+  if (Test-Path -LiteralPath $sourceInternal) {{
+    $internalOk = $false
+    for ($attempt = 1; $attempt -le 30; $attempt++) {{
+      $null = robocopy $sourceInternal $targetInternal /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP
+      $copyCode = $LASTEXITCODE
+      Write-UpdateLog ("_internal robocopy attempt " + $attempt + " exit code: " + $copyCode)
+      if ($copyCode -lt 8) {{
+        $internalOk = $true
+        break
+      }}
+      Start-Sleep -Milliseconds 500
+    }}
+    if (-not $internalOk) {{
+      throw "copy _internal failed after retries"
+    }}
+    Write-UpdateLog "copied _internal to install dir"
+  }} else {{
+    Write-UpdateLog "_internal not found in source dir"
+  }}
+
+  if (-not (Test-Path -LiteralPath $installedExe)) {{
+    throw "installed exe missing: $installedExe"
+  }}
+
+  Write-UpdateLog "starting installed exe: $installedExe"
+  Start-Process -FilePath $installedExe -WorkingDirectory $currentDir
 }} catch {{
-  Write-UpdateLog ("copy exe failed: " + $_.Exception.Message)
+  Write-UpdateLog ("install/start failed: " + $_.Exception.Message)
   throw
 }}
-$sourceInternal = Join-Path $newDir '_internal'
-$targetInternal = Join-Path $currentDir '_internal'
-if (Test-Path -LiteralPath $sourceInternal) {{
-  $internalOk = $false
-  for ($attempt = 1; $attempt -le 30; $attempt++) {{
-    $null = robocopy $sourceInternal $targetInternal /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP
-    $copyCode = $LASTEXITCODE
-    Write-UpdateLog ("_internal robocopy attempt " + $attempt + " exit code: " + $copyCode)
-    if ($copyCode -lt 8) {{
-      $internalOk = $true
-      break
-    }}
-    Start-Sleep -Milliseconds 500
-  }}
-  if (-not $internalOk) {{
-    throw "copy _internal failed after retries"
-  }}
-  Write-UpdateLog "copied _internal to install dir"
-}}
-
-$installedExe = Join-Path $currentDir (Split-Path $currentExe -Leaf)
-  Write-UpdateLog "installed exe missing after move"
-  throw "installed exe missing: $installedExe"
-}}
-Write-UpdateLog "starting installed exe: $installedExe"
-Start-Process -FilePath $installedExe -WorkingDirectory $currentDir
-Start-Process -FilePath $installedExe -WorkingDirectory $currentDir
 
 Start-Sleep -Seconds 2
 if ($packagePath -and (Test-Path -LiteralPath $packagePath)) {{
