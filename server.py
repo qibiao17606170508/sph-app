@@ -669,7 +669,13 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     current_dir = os.path.dirname(current_exe)
     new_dir = os.path.dirname(new_exe)
     old_pid = os.getpid()
-    helper_log_root = BASE_DIR or tempfile.gettempdir()
+    helper_log_root = (
+        os.environ.get('LOCALAPPDATA')
+        or os.environ.get('APPDATA')
+        or BASE_DIR
+        or tempfile.gettempdir()
+    )
+    helper_log_root = os.path.join(helper_log_root, '视频号批量上传')
     os.makedirs(helper_log_root, exist_ok=True)
     log_path = os.path.join(helper_log_root, 'update-helper.log')
 
@@ -722,30 +728,21 @@ if (-not (Test-Path -LiteralPath $currentDir)) {{
 
 try {{
   if ((Test-Path -LiteralPath $newDir) -and ($newDir -ne $currentDir)) {{
-    $backupDir = "$currentDir.old"
-    if (Test-Path -LiteralPath $backupDir) {{
-      Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
-      Write-UpdateLog "removed stale backup dir: $backupDir"
-    }}
-    if (Test-Path -LiteralPath $currentDir) {{
-      Move-Item -LiteralPath $currentDir -Destination $backupDir -Force
-      Write-UpdateLog "moved current dir to backup: $backupDir"
-    }}
-    try {{
-      Move-Item -LiteralPath $newDir -Destination $currentDir -Force
-      Write-UpdateLog "moved new dir into place"
-    }} catch {{
-      Write-UpdateLog ("move new dir failed: " + $_.Exception.Message)
-      if ((-not (Test-Path -LiteralPath $currentDir)) -and (Test-Path -LiteralPath $backupDir)) {{
-        Move-Item -LiteralPath $backupDir -Destination $currentDir -Force -ErrorAction SilentlyContinue
-        Write-UpdateLog "restored backup dir"
+    $installOk = $false
+    for ($attempt = 1; $attempt -le 90; $attempt++) {{
+      $null = robocopy $newDir $currentDir /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP
+      $copyCode = $LASTEXITCODE
+      Write-UpdateLog ("robocopy attempt " + $attempt + " exit code: " + $copyCode)
+      if ($copyCode -lt 8) {{
+        $installOk = $true
+        break
       }}
-      throw
+      Start-Sleep -Seconds 1
     }}
-    if (Test-Path -LiteralPath $backupDir) {{
-      Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
-      Write-UpdateLog "removed backup dir"
+    if (-not $installOk) {{
+      throw "robocopy failed after retries"
     }}
+    Write-UpdateLog "robocopy install finished"
   }}
 }} catch {{
   Write-UpdateLog ("install step failed: " + $_.Exception.Message)
