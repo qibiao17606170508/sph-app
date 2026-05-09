@@ -1068,11 +1068,17 @@ def _restart_app_process(open_target, package_path='', extract_dir='', install_d
             pass
         os._exit(0)
 
-    if sys.platform == 'win32':
-        time.sleep(1.2)
+    time.sleep(1.2)
+    # Windows 下解压目录要留给辅助更新脚本继续读取/复制，不能由当前进程提前删除。
+    # 否则 helper 等待旧进程退出后会发现 new_dir 已不存在。
+    if sys.platform != 'win32':
+        _cleanup_update_artifacts(package_path, extract_dir, target)
     else:
-        time.sleep(1.2)
-    _cleanup_update_artifacts(package_path, extract_dir, target)
+        try:
+            with open(os.path.join(DOWNLOADS_DIR, 'update-helper.log'), 'a', encoding='utf-8') as f:
+                f.write(f'[{datetime.now()}] parent keeps update artifacts for windows helper: extract_dir={extract_dir}\n')
+        except Exception:
+            pass
     try:
         cleanup()
     except Exception:
