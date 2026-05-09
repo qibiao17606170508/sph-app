@@ -12,21 +12,88 @@ if sys.version_info < (3, 6):
     raise SystemExit(1)
 
 import os
+import shutil
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
+APP_DATA_FOLDER_NAME = '视频号批量上传'
 
 
 def get_runtime_base_dir():
     if not getattr(sys, 'frozen', False):
         return base_dir
+    if sys.platform == 'win32':
+        support_root = (
+            os.environ.get('LOCALAPPDATA')
+            or os.environ.get('APPDATA')
+            or os.path.expanduser('~')
+        )
+        support_dir = os.path.join(support_root, APP_DATA_FOLDER_NAME)
+        os.makedirs(support_dir, exist_ok=True)
+        return support_dir
     if sys.platform == 'darwin':
         support_dir = os.path.join(
             os.path.expanduser('~/Library/Application Support'),
-            '视频号批量上传'
+            APP_DATA_FOLDER_NAME
         )
         os.makedirs(support_dir, exist_ok=True)
         return support_dir
     return os.path.dirname(sys.executable)
+
+
+def get_install_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return base_dir
+
+
+def migrate_runtime_data(install_dir, runtime_dir):
+    if not getattr(sys, 'frozen', False):
+        return
+    if not install_dir or not runtime_dir:
+        return
+    install_real = os.path.realpath(install_dir)
+    runtime_real = os.path.realpath(runtime_dir)
+    if install_real == runtime_real or not os.path.isdir(install_real):
+        return
+
+    file_names = (
+        'accounts.json',
+        'accounts.json.bak',
+        'results.csv',
+        'upload.log',
+        'app.log',
+        'last-batch.csv',
+    )
+    dir_names = (
+        'browser-profiles',
+        'uploads',
+        'screenshots',
+        'webview-storage',
+        'downloads',
+        'data',
+    )
+
+    os.makedirs(runtime_real, exist_ok=True)
+
+    for name in file_names:
+        src = os.path.join(install_real, name)
+        dst = os.path.join(runtime_real, name)
+        if not os.path.isfile(src) or os.path.exists(dst):
+            continue
+        try:
+            shutil.copy2(src, dst)
+        except OSError:
+            pass
+
+    for name in dir_names:
+        src = os.path.join(install_real, name)
+        dst = os.path.join(runtime_real, name)
+        if not os.path.isdir(src) or os.path.exists(dst):
+            continue
+        try:
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        except OSError:
+            pass
 
 # 添加项目根目录到 Python 路径
 if base_dir not in sys.path:
@@ -67,8 +134,10 @@ os.environ.setdefault(
 
 # frozen (PyInstaller) vs 开发模式: 区分可写数据目录和只读资源目录
 if getattr(sys, 'frozen', False):
-    # 可写数据: Windows 用 exe 所在目录；macOS 用 Application Support
+    # 可写数据: Windows/macOS 都使用独立用户数据目录，避免被安装目录更新覆盖
     os.environ['APP_BASE_DIR'] = get_runtime_base_dir()
+    os.environ['APP_INSTALL_DIR'] = get_install_dir()
+    migrate_runtime_data(os.environ['APP_INSTALL_DIR'], os.environ['APP_BASE_DIR'])
     # 只读资源: PyInstaller 临时解压目录 (_internal/)
     os.environ['APP_RES_DIR'] = sys._MEIPASS
     # Playwright 浏览器: 优先检查 _internal/ms-playwright/
