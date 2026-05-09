@@ -695,6 +695,7 @@ def _schedule_windows_update_install_and_launch(open_target, package_path='', ex
     quoted_extract_dir = _powershell_single_quote(os.path.normpath(str(extract_dir or '').strip()))
     quoted_script_path = _powershell_single_quote(script_path)
     quoted_log_path = _powershell_single_quote(log_path)
+    # 使用 utf-8-sig 编码写入脚本，确保 PowerShell 5.1 能正确识别中文路径
     script = """$ErrorActionPreference = 'Stop'
 $oldPid = __OLD_PID__
 $newDir = __NEW_DIR__
@@ -706,115 +707,125 @@ $scriptPath = __SCRIPT_PATH__
 $logPath = __LOG_PATH__
 $safeWorkingDir = [System.IO.Path]::GetTempPath()
 
-function Write-UpdateLog($message) {{
-  try {{
-    Add-Content -LiteralPath $logPath -Value ("[" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "] " + $message)
-  }} catch {{
-  }}
-}}
+function Write-UpdateLog($message) {
+  try {
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "[$ts] [PowerShell] $message" | Out-File -FilePath $logPath -Append -Encoding utf8
+  } catch {
+  }
+}
 
 Write-UpdateLog "helper start: currentDir=$currentDir ; newDir=$newDir ; currentExe=$currentExe"
-try {{
+try {
   Set-Location -LiteralPath $safeWorkingDir
   Write-UpdateLog "switched working dir to: $safeWorkingDir"
-}} catch {{
+} catch {
   Write-UpdateLog ("switch working dir failed: " + $_.Exception.Message)
-}}
+}
 
-for ($i = 0; $i -lt 120; $i++) {{
-  if (-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {{
+# 等待旧进程完全退出
+Write-UpdateLog "waiting for old process ($oldPid) to exit..."
+for ($i = 0; $i -lt 60; $i++) {
+  if (-not (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {
     Write-UpdateLog "old process exited"
     break
-  }}
+  }
   Start-Sleep -Seconds 1
-}}
+}
 
-if (-not (Test-Path -LiteralPath $newDir)) {{
+# 兜底：如果进程还在，尝试停止它（仅限主进程）
+if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
+  Write-UpdateLog "old process still alive, attempting to stop..."
+  Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+}
+
+if (-not (Test-Path -LiteralPath $newDir)) {
   Write-UpdateLog "install source dir missing: $newDir"
   throw "install source dir missing: $newDir"
-}}
+}
 
-if (-not (Test-Path -LiteralPath $currentDir)) {{
-  New-Item -ItemType Directory -Path $currentDir -Force | Out-Null
-  Write-UpdateLog "created currentDir: $currentDir"
-}}
-
-try {{
-  if ($newDir -ne $currentDir) {{
+try {
+  if ($newDir -ne $currentDir) {
     $installOk = $false
-    for ($attempt = 1; $attempt -le 90; $attempt++) {{
+    Write-UpdateLog "starting robocopy from $newDir to $currentDir"
+    for ($attempt = 1; $attempt -le 30; $attempt++) {
+      # 使用 robocopy 同步文件，排除数据目录和日志
       $null = robocopy $newDir $currentDir __ROBOCOPY_OPTS__
       $copyCode = $LASTEXITCODE
       Write-UpdateLog ("robocopy attempt " + $attempt + " exit code: " + $copyCode)
-      if ($copyCode -lt 8) {{
+      # robocopy 退出码 < 8 表示成功或仅有部分文件已存在/跳过
+      if ($copyCode -lt 8) {
         $installOk = $true
         break
-      }}
+      }
       Start-Sleep -Seconds 1
-    }}
-    if (-not $installOk) {{
-      throw "robocopy failed after retries"
-    }}
+    }
+    if (-not $installOk) {
+      throw "robocopy failed after retries (exit code $copyCode)"
+    }
     Write-UpdateLog "robocopy install finished"
-  }}
+  }
 
-  Start-Sleep -Milliseconds 400
+  Start-Sleep -Milliseconds 500
   $exeName = Split-Path $currentExe -Leaf
   $sourceExe = Join-Path $newDir $exeName
   $installedExe = Join-Path $currentDir $exeName
-  Write-UpdateLog "sourceExe=$sourceExe ; installedExe=$installedExe"
-  if (-not (Test-Path -LiteralPath $sourceExe)) {{
-    throw "source exe missing: $sourceExe"
-  }}
+  
+  # 确保主程序已更新
+  if (Test-Path -LiteralPath $sourceExe) {
+    Write-UpdateLog "ensuring main exe is updated: $installedExe"
+    Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force -ErrorAction SilentlyContinue
+  }
 
-  Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force
-  Write-UpdateLog "copied exe to install dir"
-
+  # 处理 _internal 目录（如果是 PyInstaller 打包）
   $sourceInternal = Join-Path $newDir '_internal'
   $targetInternal = Join-Path $currentDir '_internal'
-  if (Test-Path -LiteralPath $sourceInternal) {{
+  if (Test-Path -LiteralPath $sourceInternal) {
+    Write-UpdateLog "updating _internal directory..."
     $internalOk = $false
-    for ($attempt = 1; $attempt -le 30; $attempt++) {{
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
       $null = robocopy $sourceInternal $targetInternal /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP
-      $copyCode = $LASTEXITCODE
-      Write-UpdateLog ("_internal robocopy attempt " + $attempt + " exit code: " + $copyCode)
-      if ($copyCode -lt 8) {{
+      if ($LASTEXITCODE -lt 8) {
         $internalOk = $true
         break
-      }}
+      }
       Start-Sleep -Milliseconds 500
-    }}
-    if (-not $internalOk) {{
-      throw "copy _internal failed after retries"
-    }}
-    Write-UpdateLog "copied _internal to install dir"
-  }} else {{
-    Write-UpdateLog "_internal not found in source dir"
-  }}
+    }
+    if (-not $internalOk) {
+      Write-UpdateLog "warning: _internal update partially failed"
+    }
+  }
 
-  if (-not (Test-Path -LiteralPath $installedExe)) {{
+  if (-not (Test-Path -LiteralPath $installedExe)) {
     throw "installed exe missing: $installedExe"
-  }}
+  }
 
-  Write-UpdateLog "starting installed exe: $installedExe"
+  Write-UpdateLog "launching new version: $installedExe"
   Start-Process -FilePath $installedExe -WorkingDirectory $currentDir
-}} catch {{
-  Write-UpdateLog ("install/start failed: " + $_.Exception.Message)
+  Write-UpdateLog "new version launched, helper exiting."
+} catch {
+  Write-UpdateLog ("CRITICAL ERROR: " + $_.Exception.Message)
+  # 发生致命错误时尝试重新启动原程序，避免程序完全消失
+  if (Test-Path -LiteralPath $currentExe) {
+    Write-UpdateLog "attempting to restart current exe after failure..."
+    Start-Process -FilePath $currentExe -WorkingDirectory $currentDir
+  }
   throw
-}}
+}
 
-Start-Sleep -Seconds 2
-if ($packagePath -and (Test-Path -LiteralPath $packagePath)) {{
+Start-Sleep -Seconds 5
+# 清理临时文件
+if ($packagePath -and (Test-Path -LiteralPath $packagePath)) {
   Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
-  Write-UpdateLog "removed package: $packagePath"
-}}
-if ($extractDir -and (Test-Path -LiteralPath $extractDir)) {{
+}
+if ($extractDir -and (Test-Path -LiteralPath $extractDir)) {
   Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-  Write-UpdateLog "removed extract dir: $extractDir"
-}}
-if (Test-Path -LiteralPath $scriptPath) {{
+}
+# 脚本自删除
+if (Test-Path -LiteralPath $scriptPath) {
   Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
-}}
+}
 """
     script = (
         script
@@ -829,30 +840,44 @@ if (Test-Path -LiteralPath $scriptPath) {{
         .replace('__ROBOCOPY_OPTS__', f"/MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP /XD {keep_dirs_args} /XF {keep_files_args}")
     )
     try:
-        with os.fdopen(script_fd, 'w', encoding='utf-8') as f:
+        # 使用 utf-8-sig 编码，这会在文件开头添加 BOM，是 PowerShell 5.1 正确识别 UTF-8 的关键
+        with os.fdopen(script_fd, 'w', encoding='utf-8-sig') as f:
             f.write(script)
+        
+        # 准备启动参数
+        powershell_exe = 'powershell.exe'
+        args = [
+            powershell_exe,
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-WindowStyle',
+            'Hidden',
+            '-File',
+            script_path,
+        ]
+        
         creationflags = 0
+        # CREATE_NO_WINDOW 确保不会弹出黑框，DETACHED_PROCESS 允许父进程退出后继续运行
         for flag_name in ('CREATE_NEW_PROCESS_GROUP', 'DETACHED_PROCESS', 'CREATE_NO_WINDOW'):
             creationflags |= int(getattr(subprocess, flag_name, 0) or 0)
+        
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(f'[{datetime.now()}] starting powershell update helper: {" ".join(args)}\n')
+            
         subprocess.Popen(
-            [
-                'powershell',
-                '-NoProfile',
-                '-NonInteractive',
-                '-ExecutionPolicy',
-                'Bypass',
-                '-WindowStyle',
-                'Hidden',
-                '-File',
-                script_path,
-            ],
+            args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
             close_fds=True,
+            cwd=tempfile.gettempdir(), # 切换工作目录到临时文件夹，避免占用当前目录
         )
         return current_exe
-    except Exception:
+    except Exception as e:
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(f'[{datetime.now()}] failed to launch powershell: {e}\n')
         try:
             os.close(script_fd)
         except Exception:
