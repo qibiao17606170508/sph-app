@@ -148,41 +148,19 @@ function handleBlockingLoadingEvent(d) {
 
 function loadRememberedLogin() {
   try {
-    const raw = localStorage.getItem(REMEMBER_LOGIN_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    $("loginUsername").value = data.username || "";
-    $("loginPassword").value = data.password || "";
-    $("rememberLogin").checked = Boolean(data.username || data.password);
+    localStorage.removeItem(REMEMBER_LOGIN_KEY);
   } catch (_) {
     /* ignore */
   }
 }
 
 function persistRememberedLogin(username, password) {
-  if (!$("rememberLogin").checked) {
+  try {
     localStorage.removeItem(REMEMBER_LOGIN_KEY);
-    return;
+  } catch (_) {
+    /* ignore */
   }
-  localStorage.setItem(REMEMBER_LOGIN_KEY, JSON.stringify({ username: username || "", password: password || "" }));
 }
-
-let rememberPersistTimer = null;
-function scheduleRememberPersist() {
-  if (!$("rememberLogin") || !$("rememberLogin").checked) return;
-  if (rememberPersistTimer) clearTimeout(rememberPersistTimer);
-  rememberPersistTimer = setTimeout(() => {
-    persistRememberedLogin($("loginUsername").value.trim(), $("loginPassword").value);
-  }, 250);
-}
-
-if ($("rememberLogin")) {
-  $("rememberLogin").addEventListener("change", () => {
-    persistRememberedLogin($("loginUsername").value.trim(), $("loginPassword").value);
-  });
-}
-if ($("loginUsername")) $("loginUsername").addEventListener("input", scheduleRememberPersist);
-if ($("loginPassword")) $("loginPassword").addEventListener("input", scheduleRememberPersist);
 
 function setUpdateError(message) {
   const el = $("updateError");
@@ -369,8 +347,6 @@ async function submitLogin(event) {
     }
     const data = await res.json();
     authResolved = true;
-    persistRememberedLogin(username, password);
-    if (!$("rememberLogin").checked) $("loginPassword").value = "";
     await enterAuthedApp(data.user);
     toast("登录成功", "success");
   } catch (e) {
@@ -395,7 +371,7 @@ async function logout() {
   setStatus("idle", "未登录");
   $("liveLog").textContent = "";
   setLoginError("");
-  if (!$("rememberLogin").checked) $("loginPassword").value = "";
+  $("loginPassword").value = "";
   $("loginUsername").focus();
 }
 
