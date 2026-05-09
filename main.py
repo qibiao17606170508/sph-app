@@ -1,6 +1,7 @@
 """视频号批量上传工具 - 桌面版入口"""
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,7 +13,42 @@ import webbrowser
 from datetime import datetime
 
 # 确保在可写数据目录运行
-_BASE = os.environ.get('APP_BASE_DIR', os.path.dirname(os.path.abspath(__file__)))
+_CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+if not os.environ.get('APP_RES_DIR'):
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        os.environ['APP_RES_DIR'] = sys._MEIPASS
+    else:
+        os.environ['APP_RES_DIR'] = _CODE_DIR
+
+if not os.environ.get('APP_BASE_DIR'):
+    if getattr(sys, 'frozen', False):
+        if sys.platform == 'darwin':
+            base_dir = os.path.join(os.path.expanduser('~/Library/Application Support'), '视频号批量上传')
+        else:
+            base_dir = os.path.dirname(sys.executable)
+    else:
+        if sys.platform == 'darwin':
+            base_dir = os.path.join(os.path.expanduser('~/Library/Application Support'), '视频号批量上传')
+        else:
+            base_dir = _CODE_DIR
+    try:
+        os.makedirs(base_dir, exist_ok=True)
+        if base_dir != _CODE_DIR:
+            for name in ('results.csv', 'upload.log'):
+                src = os.path.join(_CODE_DIR, name)
+                dst = os.path.join(base_dir, name)
+                if os.path.isfile(src) and not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+            src_storage = os.path.join(_CODE_DIR, 'webview-storage')
+            dst_storage = os.path.join(base_dir, 'webview-storage')
+            if os.path.isdir(src_storage) and not os.path.exists(dst_storage):
+                shutil.copytree(src_storage, dst_storage)
+    except Exception:
+        pass
+    os.environ['APP_BASE_DIR'] = base_dir
+
+_BASE = os.environ.get('APP_BASE_DIR', _CODE_DIR)
+os.makedirs(_BASE, exist_ok=True)
 os.chdir(_BASE)
 
 # 确保必要目录存在

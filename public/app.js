@@ -167,6 +167,23 @@ function persistRememberedLogin(username, password) {
   localStorage.setItem(REMEMBER_LOGIN_KEY, JSON.stringify({ username: username || "", password: password || "" }));
 }
 
+let rememberPersistTimer = null;
+function scheduleRememberPersist() {
+  if (!$("rememberLogin") || !$("rememberLogin").checked) return;
+  if (rememberPersistTimer) clearTimeout(rememberPersistTimer);
+  rememberPersistTimer = setTimeout(() => {
+    persistRememberedLogin($("loginUsername").value.trim(), $("loginPassword").value);
+  }, 250);
+}
+
+if ($("rememberLogin")) {
+  $("rememberLogin").addEventListener("change", () => {
+    persistRememberedLogin($("loginUsername").value.trim(), $("loginPassword").value);
+  });
+}
+if ($("loginUsername")) $("loginUsername").addEventListener("input", scheduleRememberPersist);
+if ($("loginPassword")) $("loginPassword").addEventListener("input", scheduleRememberPersist);
+
 function setUpdateError(message) {
   const el = $("updateError");
   if (!el) return;
@@ -2145,17 +2162,31 @@ $("logToggle").addEventListener("click", function () {
 })();
 
 window.addEventListener("focus", () => {
-  runWindowOpenChecks().catch((e) => {
+  runWindowOpenChecks({ force: true, autoEnterAuth: true }).catch((e) => {
     console.error("Window focus check error:", e);
+  });
+});
+
+["pointerdown", "keydown"].forEach((eventName) => {
+  window.addEventListener(eventName, () => {
+    if (document.visibilityState && document.visibilityState !== "visible") return;
+    runWindowOpenChecks({ force: false, autoEnterAuth: true }).catch((e) => {
+      console.error("Window activity check error:", e);
+    });
   });
 });
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
-  runWindowOpenChecks().catch((e) => {
+  runWindowOpenChecks({ force: true, autoEnterAuth: true }).catch((e) => {
     console.error("Window visibility check error:", e);
   });
 });
+
+setInterval(() => {
+  if (document.visibilityState && document.visibilityState !== "visible") return;
+  runWindowOpenChecks({ force: false, autoEnterAuth: true }).catch(() => {});
+}, 60000);
 
 /* ═══════════════════════════════════════════════
    INIT
@@ -2178,7 +2209,7 @@ document.addEventListener("visibilitychange", () => {
       }
     })
     .catch(() => {});
-  runWindowOpenChecks({ force: true, autoEnterAuth: false })
+  runWindowOpenChecks({ force: true, autoEnterAuth: true })
     .then(() => {
       if (!authUser) {
         if ($("loginPassword").value) $("loginPassword").focus();
