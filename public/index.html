@@ -107,7 +107,7 @@
               <line x1="3" y1="12" x2="3.01" y2="12" />
               <line x1="3" y1="18" x2="3.01" y2="18" />
             </svg>
-            <span>结果</span>
+            <span>历史记录</span>
           </button>
           <button class="nav-item" data-view="logs" style="display: none">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -134,8 +134,9 @@
             </div>
           </div>
           <div class="sidebar-user" id="sidebarUser" style="display: none">
-            <button class="btn btn-ghost sidebar-logout-btn" id="openAccountBtn" type="button">打开账号</button>
-            <button class="btn btn-ghost sidebar-logout-btn" id="logoutBtn" type="button">退出登录</button>
+            <button class="btn btn-ghost btn-sm sidebar-logout-btn" style="font-weight: bold" id="openAccountBtn" type="button">打开视频号</button>
+            <button class="btn btn-ghost btn-sm sidebar-logout-btn" style="font-weight: bold" id="changePasswordBtn" type="button">修改密码</button>
+            <button class="btn btn-ghost btn-sm sidebar-logout-btn" style="font-weight: bold" id="logoutBtn" type="button">退出登录</button>
           </div>
           <div class="sidebar-version-wrap">
             <div class="sidebar-version" id="sidebarVersion"></div>
@@ -233,7 +234,10 @@
           <div class="card form-card">
             <div class="field-row">
               <div class="field">
-                <label>视频描述</label>
+                <label class="field-label-actions">
+                  <span>视频描述</span>
+                  <button type="button" id="randomTopicsBtn" class="btn btn-ghost btn-sm field-inline-btn">随机话题</button>
+                </label>
                 <textarea id="formDesc" class="input textarea" rows="2" placeholder="视频文案描述，支持 #话题标签"></textarea>
               </div>
             </div>
@@ -333,7 +337,7 @@
         <!-- ─── RESULTS ─── -->
         <section class="view" id="view-results">
           <div class="view-header">
-            <h2>发布结果</h2>
+            <h2>历史记录</h2>
             <p>查看每次上传的详细发布状态</p>
           </div>
 
@@ -348,14 +352,6 @@
               </div>
               <div class="card-actions" style="gap: 8px">
                 <input type="text" id="resultSearch" class="input" placeholder="搜索标题或文件名…" style="width: 200px; height: 32px; font-size: 13px" aria-label="搜索发布结果" />
-                <button id="exportResultsBtn" class="btn btn-ghost btn-sm">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
-                  导出 CSV
-                </button>
                 <button id="refreshResultsBtn" class="btn btn-ghost btn-sm">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <polyline points="23 4 23 10 17 10" />

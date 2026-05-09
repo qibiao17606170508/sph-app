@@ -159,6 +159,7 @@ shutdown_timer = None
 SHUTDOWN_DELAY = 30  # seconds
 AUTH_LOGIN_URL = 'http://47.114.217.61:9988/api/v1/admin/login'
 AUTH_USER_INFO_URL = 'http://47.114.217.61:9988/api/v1/admin/user-info'
+AUTH_CHANGE_PASSWORD_URL = 'http://47.114.217.61:9988/api/v1/admin/change-password'
 DOWNLOADS_DIR = os.path.join(BASE_DIR, 'downloads')
 UPDATE_USER_AGENT = 'wechat-channels-uploader/1.0'
 AUTH_STATUS_GRACE_SECONDS = 8
@@ -391,20 +392,38 @@ def launch_update_target(file_path):
     subprocess.Popen(['xdg-open', file_path])
 
 
+def _powershell_single_quote(value):
+    return "'" + str(value or '').replace("'", "''") + "'"
+
+
 def schedule_update_target_launch(file_path):
     target = str(file_path or '').strip()
     if not target:
         raise ValueError('缺少启动目标')
 
     if sys.platform == 'win32':
-        # Delay relaunch until the current process has exited, otherwise the new app
-        # may fail to bind its local server/port and appear to "flash" then exit.
-        start_cmd = f'ping 127.0.0.1 -n 3 >nul && start "" "{target}"'
+        target = os.path.normpath(target)
+        work_dir = os.path.dirname(target) or os.getcwd()
+        ps_script = (
+            "Start-Sleep -Seconds 2; "
+            f"Start-Process -FilePath {_powershell_single_quote(target)} "
+            f"-WorkingDirectory {_powershell_single_quote(work_dir)}"
+        )
         creationflags = 0
         for flag_name in ('CREATE_NEW_PROCESS_GROUP', 'DETACHED_PROCESS', 'CREATE_NO_WINDOW'):
             creationflags |= int(getattr(subprocess, flag_name, 0) or 0)
         subprocess.Popen(
-            ['cmd', '/c', start_cmd],
+            [
+                'powershell',
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-WindowStyle',
+                'Hidden',
+                '-Command',
+                ps_script,
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
@@ -817,6 +836,43 @@ def extract_login_error(status_code, payload, raw_text):
     return f'登录失败（{status_code}）'
 
 
+def extract_remote_message(payload, raw_text, default_message):
+    if isinstance(payload, dict):
+        for key in ('msg', 'message', 'error', 'detail'):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    if raw_text and raw_text.strip():
+        return raw_text.strip()[:200]
+    return default_message
+
+
+def remote_response_ok(status_code, payload):
+    if not (200 <= status_code < 300):
+        return False
+    if not isinstance(payload, dict):
+        return True
+    if payload.get('success') is False:
+        return False
+
+    code = payload.get('code')
+    if code is not None:
+        if isinstance(code, bool):
+            return code
+        if isinstance(code, (int, float)):
+            if code not in (0, 200):
+                return False
+        elif str(code).lower() not in ('0', '200', 'ok', 'success'):
+            return False
+
+    status = payload.get('status')
+    if isinstance(status, (int, float)):
+        return int(status) in (0, 200)
+    if isinstance(status, str):
+        return status.lower() in ('0', '200', 'ok', 'success')
+    return True
+
+
 def _find_token_in_payload(obj):
     if isinstance(obj, dict):
         for key in ('token', 'accessToken', 'access_token', 'jwt', 'authorization'):
@@ -979,6 +1035,51 @@ def authenticate_remote(username, password):
         return False, {'message': extract_login_error(status_code, payload, raw)}, payload
 
     return True, payload if isinstance(payload, dict) else {}, payload
+
+
+def remote_change_password(token, current_password, new_password, confirm_password):
+    token = str(token or '').strip()
+    if not token:
+        return False, '登录状态已失效，请重新登录', True
+
+    body = json.dumps({
+        'currentPassword': current_password,
+        'newPassword': new_password,
+        'confirmPassword': confirm_password,
+    }).encode('utf-8')
+    req = urllib.request.Request(
+        AUTH_CHANGE_PASSWORD_URL,
+        data=body,
+        headers={
+            'Content-Type': 'application/json',
+            'token': token,
+            'User-Agent': UPDATE_USER_AGENT,
+        },
+        method='POST',
+    )
+
+    try:
+        with urlopen_with_context(req, timeout=20) as resp:
+            status_code = resp.getcode()
+            raw = resp.read().decode('utf-8', errors='ignore')
+    except urllib.error.HTTPError as e:
+        status_code = e.code
+        raw = e.read().decode('utf-8', errors='ignore')
+    except Exception as e:
+        return False, f'修改密码失败: {e}', False
+
+    try:
+        payload = json.loads(raw) if raw else {}
+    except Exception:
+        payload = {}
+
+    if status_code == 401:
+        return False, '登录状态已失效，请重新登录', True
+
+    if remote_response_ok(status_code, payload):
+        return True, extract_remote_message(payload, raw, '密码修改成功'), False
+
+    return False, extract_remote_message(payload, raw, f'修改密码失败（{status_code}）'), False
 
 
 @app.before_request
@@ -1321,6 +1422,32 @@ def api_auth_login():
 def api_auth_logout():
     clear_auth_session()
     return jsonify({'message': '已退出登录'})
+
+
+@app.route('/api/auth/change-password', methods=['POST'])
+def api_auth_change_password():
+    token = session.get('auth_token')
+    if not token:
+        clear_auth_session()
+        return jsonify({'error': '登录状态已失效，请重新登录'}), 401
+
+    data = request.get_json(silent=True) or {}
+    current_password = str(data.get('currentPassword', ''))
+    new_password = str(data.get('newPassword', ''))
+    confirm_password = str(data.get('confirmPassword', ''))
+
+    if not current_password or not new_password or not confirm_password:
+        return jsonify({'error': '请完整填写当前密码、新密码和确认密码'}), 400
+    if new_password != confirm_password:
+        return jsonify({'error': '两次输入的新密码不一致'}), 400
+
+    ok, message, expired = remote_change_password(token, current_password, new_password, confirm_password)
+    if expired:
+        clear_auth_session()
+        return jsonify({'error': '登录状态已失效，请重新登录'}), 401
+    if not ok:
+        return jsonify({'error': message}), 400
+    return jsonify({'message': message})
 
 
 # ── Accounts ──

@@ -29,6 +29,8 @@ let accountVerifyLoading = false;
 let uploadOrderIds = [];
 
 const addEntryBtnDefault = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加到队列`;
+const RANDOM_TOPIC_COUNT = 6;
+const UNIVERSAL_SHORT_DRAMA_TOPICS = ["#真人仿真漫剧", "#AI真人漫剧", "#仿真人漫剧解说", "#真人漫剧解说", "#好看仿真短剧", "#一口气看完短剧", "#解说漫", "#AI漫剧", "#解压真人剧情", "#漫剧爱好者", "#下饭漫剧", "#解压漫剧", "#漫剧合集", "#免费漫剧", "#爽文漫剧", "#脑洞漫剧", "#智能漫剧解说", "#动态漫解说", "#宝藏仿真漫剧", "#热门短剧", "#全程高能短剧", "#高能漫剧", "#精彩短剧", "#通宵追剧", "#追剧上头", "#宝藏短剧", "#沉浸式追剧", "#热门漫剧推荐", "#精彩剧情", "#全网热播短剧", "#剧情高能", "#越看越上头", "#今日短剧推荐", "#精彩不断", "#必看短剧", "#热门剧情", "#高分短剧", "#优质漫剧", "#剧荒必看", "#全程精彩", "#短剧分享", "#短剧安利", "#追剧日常", "#短剧推荐", "#短剧解说", "#剧情解说", "#沉浸式看剧", "#全程反转", "#反转剧情", "#高甜短剧", "#虐恋短剧", "#都市短剧", "#情感短剧", "#悬疑短剧", "#逆袭短剧", "#成长短剧", "#高能反转", "#剧情向", "#故事感拉满", "#全网精选短剧", "#精品短剧", "#剧情节奏拉满", "#情节紧凑", "#越看越精彩", "#短剧控", "#漫剧控", "#剧情控", "#短剧合集推荐", "#短剧宝藏", "#看剧停不下来", "#看剧时间到", "#剧情太上头", "#短剧也精彩", "#热门故事", "#通用短剧话题", "#日常追剧", "#精彩片段", "#高能片段", "#热门解说", "#剧情解析", "#轻松追剧", "#热门推荐", "#全网都在看", "#值得一看", "#神仙剧情", "#剧情拉满", "#超上头短剧", "#宝藏剧情", "#每集都精彩", "#刷到停不下", "#短剧风暴", "#剧情盛宴", "#热播漫剧", "#剧集推荐", "#追剧必备", "#下饭好剧", "#上头剧情", "#好剧分享", "#宝藏好剧", "#高能故事"];
 
 /* ─── Helpers ─── */
 const esc = (s) => {
@@ -62,6 +64,34 @@ function setLoginError(message) {
   if (!el) return;
   el.textContent = message || "";
   el.style.display = message ? "block" : "none";
+}
+
+function shuffleArray(list) {
+  const arr = [...list];
+  for (let i = arr.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function pickRandomTopics(count = RANDOM_TOPIC_COUNT) {
+  return shuffleArray(UNIVERSAL_SHORT_DRAMA_TOPICS).slice(0, Math.max(1, Math.min(count, UNIVERSAL_SHORT_DRAMA_TOPICS.length)));
+}
+
+function appendRandomTopicsToDesc() {
+  const descEl = $("formDesc");
+  if (!descEl) return;
+  const current = String(descEl.value || "").trim();
+  const existingTopics = new Set((current.match(/#[^\s#]+/g) || []).map((item) => item.trim()));
+  const topics = shuffleArray(UNIVERSAL_SHORT_DRAMA_TOPICS)
+    .filter((topic) => !existingTopics.has(topic))
+    .slice(0, RANDOM_TOPIC_COUNT);
+  const pickedTopics = topics.length > 0 ? topics : pickRandomTopics();
+  const topicText = pickedTopics.join(" ");
+  descEl.value = current ? `${current} ${topicText}`.trim() : topicText;
+  descEl.dispatchEvent(new Event("input", { bubbles: true }));
+  descEl.focus();
 }
 
 function setLoadingOverlayProgress(progress, indeterminate = false) {
@@ -190,25 +220,40 @@ function handleUnauthorized() {
 
 /* ─── Modal ─── */
 let modalCallback = null;
+function hideModal() {
+  $("modalOverlay").style.display = "none";
+  modalCallback = null;
+  $("modalOk").disabled = false;
+  $("modalCancel").disabled = false;
+}
 function showModal(title, body, onOk) {
   $("modalTitle").innerHTML = esc(title);
   $("modalBody").innerHTML = body;
   $("modalOverlay").style.display = "flex";
   modalCallback = onOk || null;
+  $("modalOk").disabled = false;
+  $("modalCancel").disabled = false;
 }
 $("modalOk").addEventListener("click", async () => {
-  $("modalOverlay").style.display = "none";
-  if (modalCallback) await modalCallback();
-  modalCallback = null;
+  const callback = modalCallback;
+  $("modalOk").disabled = true;
+  $("modalCancel").disabled = true;
+  try {
+    const shouldClose = callback ? (await callback()) !== false : true;
+    if (shouldClose) hideModal();
+  } finally {
+    if ($("modalOverlay").style.display !== "none") {
+      $("modalOk").disabled = false;
+      $("modalCancel").disabled = false;
+    }
+  }
 });
 $("modalCancel").addEventListener("click", () => {
-  $("modalOverlay").style.display = "none";
-  modalCallback = null;
+  hideModal();
 });
 $("modalOverlay").addEventListener("click", (e) => {
   if (e.target === $("modalOverlay")) {
-    $("modalOverlay").style.display = "none";
-    modalCallback = null;
+    hideModal();
   }
 });
 
@@ -334,6 +379,76 @@ async function logout() {
   setLoginError("");
   if (!$("rememberLogin").checked) $("loginPassword").value = "";
   $("loginUsername").focus();
+}
+
+function openChangePasswordModal() {
+  const body = `
+    <div class="modal-form">
+      <div class="field">
+        <label for="changePasswordCurrent">当前密码</label>
+        <input type="password" id="changePasswordCurrent" class="input" placeholder="请输入当前密码" />
+      </div>
+      <div class="field">
+        <label for="changePasswordNext">新密码</label>
+        <input type="password" id="changePasswordNext" class="input" placeholder="请输入新密码" />
+      </div>
+      <div class="field">
+        <label for="changePasswordConfirm">确认新密码</label>
+        <input type="password" id="changePasswordConfirm" class="input" placeholder="请再次输入新密码" />
+      </div>
+      <span class="field-hint" id="changePasswordHint"></span>
+    </div>
+  `;
+  showModal("修改密码", body, async () => {
+    const currentPassword = ($("changePasswordCurrent")?.value || "").trim();
+    const newPassword = ($("changePasswordNext")?.value || "").trim();
+    const confirmPassword = ($("changePasswordConfirm")?.value || "").trim();
+    const hintEl = $("changePasswordHint");
+    if (hintEl) {
+      hintEl.textContent = "";
+      hintEl.className = "field-hint";
+    }
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      if (hintEl) {
+        hintEl.textContent = "请完整填写当前密码、新密码和确认密码";
+        hintEl.className = "field-hint err";
+      }
+      return false;
+    }
+    if (newPassword !== confirmPassword) {
+      if (hintEl) {
+        hintEl.textContent = "两次输入的新密码不一致";
+        hintEl.className = "field-hint err";
+      }
+      return false;
+    }
+
+    try {
+      const res = await api("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (hintEl) {
+          hintEl.textContent = data.error || "修改密码失败，请稍后重试";
+          hintEl.className = "field-hint err";
+        }
+        return false;
+      }
+      toast(data.message || "密码修改成功", "success");
+      return true;
+    } catch (e) {
+      if (e.message === "UNAUTHORIZED") return true;
+      if (hintEl) {
+        hintEl.textContent = e.message || "修改密码失败，请稍后重试";
+        hintEl.className = "field-hint err";
+      }
+      return false;
+    }
+  });
+  setTimeout(() => $("changePasswordCurrent")?.focus(), 0);
 }
 
 function applyVersionInfo(info) {
@@ -548,6 +663,9 @@ async function runWindowOpenChecks(options = {}) {
 $("loginForm").addEventListener("submit", submitLogin);
 $("logoutBtn").addEventListener("click", logout);
 $("updateNowBtn").addEventListener("click", startDirectUpdate);
+if ($("changePasswordBtn")) {
+  $("changePasswordBtn").addEventListener("click", openChangePasswordModal);
+}
 
 if ($("checkUpdateBtn")) {
   $("checkUpdateBtn").addEventListener("click", async () => {
@@ -1097,6 +1215,13 @@ $("formTitle").addEventListener("input", function () {
   hint.textContent = "OK";
   hint.className = "field-hint ok";
 });
+
+if ($("randomTopicsBtn")) {
+  $("randomTopicsBtn").addEventListener("click", () => {
+    appendRandomTopicsToDesc();
+    toast(`已随机添加 ${RANDOM_TOPIC_COUNT} 个话题`, "success");
+  });
+}
 
 /* ═══════════════════════════════════════════════
    DRAG & DROP (file upload)

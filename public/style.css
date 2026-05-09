@@ -959,6 +959,19 @@ select.input {
   margin-bottom: 14px;
 }
 
+.field-label-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.field-inline-btn {
+  min-height: 30px;
+  padding: 6px 12px;
+  white-space: nowrap;
+}
+
 .field-row-4 {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1955,6 +1968,27 @@ table tbody tr:last-child td {
   line-height: 1.7;
 }
 
+.modal-form {
+  display: grid;
+  gap: 12px;
+}
+
+.modal-form .field {
+  margin: 0;
+}
+
+.modal-form label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.modal-form .field-hint {
+  margin-top: 8px;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -2170,20 +2204,26 @@ table tbody tr:last-child td {
   display: flex;
   align-items: center;
   justify-content: stretch;
-  gap: 10px;
+  gap: 8px;
   padding: 0;
   border: none;
   background: transparent;
   border-radius: 0;
 }
 
+.sidebar-user .btn {
+  flex: 1;
+  min-width: 0;
+}
+
 .sidebar-logout-btn {
   width: 100%;
-  min-height: 38px;
+  min-height: 28px;
+  padding: 6px 10px;
   justify-content: center;
   border-radius: 999px;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 500;
   border: 1px solid rgba(255, 255, 255, 0.58);
   background: rgba(255, 255, 255, 0.46);
 }
