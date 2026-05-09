@@ -872,6 +872,7 @@ def _prepare_headless_upload_profile(profile_dir):
     temp_root = tempfile.mkdtemp(prefix='wx-headless-profile-')
     dst = os.path.join(temp_root, 'profile')
     try:
+        os.makedirs(src, exist_ok=True)
         _copy_profile_tree(src, dst)
         logger.info(f'Headless upload profile prepared: {dst}')
         return dst, temp_root
@@ -931,6 +932,7 @@ def _prepare_visible_browser_profile(profile_dir):
     temp_root = tempfile.mkdtemp(prefix='wx-visible-profile-')
     dst = os.path.join(temp_root, 'profile')
     try:
+        os.makedirs(src, exist_ok=True)
         _copy_profile_tree(src, dst)
         logger.info(f'Visible browser profile prepared: {dst}')
         return dst, temp_root

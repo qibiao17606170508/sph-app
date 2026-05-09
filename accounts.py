@@ -23,6 +23,7 @@ def _normalize_profile_dir(source_profile_dir):
     """
     target = BASE_PROFILE_DIR
     incoming = (source_profile_dir or '').strip()
+    os.makedirs(target, exist_ok=True)
     if not incoming or os.path.abspath(incoming) == os.path.abspath(target):
         return target
 
